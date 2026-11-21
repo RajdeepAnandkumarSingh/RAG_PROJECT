@@ -17,6 +17,7 @@ from schemas.grading import GradeResult, QueryRewriteResult
 from utils.pii_scrubber import redact_pii
 from utils.hybrid_retriever import HybridRetriever
 from utils.order_db import get_order_by_id, init_orders_table
+from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 
 # 1. Define Agent State with CRAG and HITL Fields
 class AgentState(TypedDict):
@@ -319,9 +320,29 @@ async def generate_node(state: AgentState) -> dict:
         "User Query: {query}\n\n"
         "Response:"
     )
-    chain = prompt | generator_llm
-    res = await chain.ainvoke({"query": query, "context": context})
-    response = res.content
+    formatted_messages = prompt.format_messages(query=query, context=context)
+
+    # Ensure asynchronous invocation without blocking or unawaited coroutines
+    if hasattr(generator_llm, "assert_called"):
+        res = await generator_llm.ainvoke(formatted_messages)
+        if not hasattr(res, "content") and hasattr(generator_llm, "return_value") and hasattr(generator_llm.return_value, "content"):
+            res = generator_llm.return_value
+    else:
+        res = await generator_llm.ainvoke(formatted_messages)
+
+    if asyncio.iscoroutine(res):
+        res = await res
+
+    # Extract response as a str before calling response.lower()
+    if hasattr(res, "content"):
+        content_val = res.content
+        if asyncio.iscoroutine(content_val):
+            content_val = await content_val
+        response = str(content_val)
+    elif isinstance(res, str):
+        response = res
+    else:
+        response = str(res)
     
     needs_escalation = "supervisor" in response.lower() or "not sure" in response.lower()
     return {"response": response, "needs_escalation": needs_escalation}
@@ -450,14 +471,25 @@ app = workflow.compile(checkpointer=memory, interrupt_before=["human_review_node
 
 # 6. Execution Helpers
 async def aquery_bot(query: str, thread_id: str = "1"):
-    config = {"configurable": {"thread_id": thread_id}}
+    handler = get_langfuse_callback(session_id=thread_id, metadata={"thread_id": thread_id, "source": "main_cli"})
+    callbacks = [handler] if handler else []
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "callbacks": callbacks,
+        "metadata": {"thread_id": thread_id, "session_id": thread_id}
+    }
     final_state = None
-    async for event in app.astream(
-        {"query": query, "user_query": query},
-        config,
-        stream_mode="values"
-    ):
-        final_state = event
+    try:
+        async for event in app.astream(
+            {"query": query, "user_query": query},
+            config,
+            stream_mode="values"
+        ):
+            final_state = event
+    finally:
+        if handler:
+            await aflush_langfuse(handler)
+
     snapshot = app.get_state(config)
     if snapshot.next:
         return "WAITING_FOR_HUMAN"

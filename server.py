@@ -1,19 +1,25 @@
-from fastapi import FastAPI, HTTPException
+import json
+import asyncio
+from typing import List, Optional, Dict, Any, AsyncGenerator
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+
 from main import app as graph_app
 from config import settings
+from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 
 server = FastAPI(
     title="Nexus RAG v2.0 API",
-    description="Customer Support RAG with Pre-Retrieval Guardrails, Hybrid Search (ChromaDB + BM25), Local Reranking, CRAG, and HITL"
+    description="Customer Support RAG with Langfuse Observability, SSE Streaming, Hybrid Search, FlashRank Reranker, CRAG, and HITL"
 )
 
 # Enable CORS for React frontend
 server.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -34,9 +40,23 @@ class ResumeRequest(BaseModel):
     response: Optional[str] = Field(None, description="Direct supervisor response override.")
     feedback: Optional[str] = Field(None, description="Supervisor feedback or instructions.")
 
+def format_sse(event_name: str, payload: Dict[str, Any]) -> str:
+    """Formats event data into standard Server-Sent Events (SSE) string."""
+    data = {"event": event_name, "stage": event_name, **payload}
+    return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
+
 @server.post("/ask", response_model=ChatResponse)
-async def ask_query(request: QueryRequest):
-    config = {"configurable": {"thread_id": request.thread_id}}
+async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
+    handler = get_langfuse_callback(
+        session_id=request.thread_id,
+        metadata={"thread_id": request.thread_id, "endpoint": "/ask"}
+    )
+    callbacks = [handler] if handler else []
+    config = {
+        "configurable": {"thread_id": request.thread_id},
+        "callbacks": callbacks,
+        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id}
+    }
     
     try:
         # Non-blocking async invocation of the LangGraph state machine
@@ -49,6 +69,9 @@ async def ask_query(request: QueryRequest):
         snapshot = graph_app.get_state(config)
         status = "escalated" if (snapshot and snapshot.next) else "success"
         
+        if handler:
+            background_tasks.add_task(flush_langfuse, handler)
+            
         return ChatResponse(
             response=result.get("response", "Escalated to human supervisor."),
             intent=result.get("intent", "Unknown"),
@@ -57,15 +80,217 @@ async def ask_query(request: QueryRequest):
             status=status
         )
     except Exception as e:
+        if handler:
+            background_tasks.add_task(flush_langfuse, handler)
         raise HTTPException(status_code=500, detail=str(e))
+
+@server.post("/api/chat/stream")
+@server.post("/chat/stream")
+async def chat_stream(request: QueryRequest):
+    """
+    Asynchronous Server-Sent Events (SSE) streaming endpoint emitting structured events
+    for each pipeline stage: guardrail_route, retrieval_results, crag_grade,
+    hitl_paused, final_response, and done.
+    """
+    handler = get_langfuse_callback(
+        session_id=request.thread_id,
+        metadata={"thread_id": request.thread_id, "endpoint": "/api/chat/stream"}
+    )
+    callbacks = [handler] if handler else []
+    config = {
+        "configurable": {"thread_id": request.thread_id},
+        "callbacks": callbacks,
+        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id}
+    }
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        retry_count = 0
+        final_response_emitted = False
+
+        try:
+            # Stream execution stage-by-stage using LangGraph updates
+            async for update in graph_app.astream(
+                {"query": request.query, "user_query": request.query},
+                config,
+                stream_mode="updates"
+            ):
+                if not isinstance(update, dict):
+                    continue
+
+                for node_name, node_out in update.items():
+                    if not isinstance(node_out, dict):
+                        continue
+
+                    # 1. Guardrail & Routing Stage
+                    if node_name == "guardrail_and_router":
+                        decision = node_out.get("route_decision")
+                        detected_pii = getattr(decision, "detected_pii", []) if decision else []
+                        masked_query = node_out.get("masked_query", "")
+                        user_query = node_out.get("user_query", "")
+                        pii_redacted = bool(detected_pii) or (masked_query != user_query)
+                        
+                        pii_serialized = [
+                            p.model_dump() if hasattr(p, "model_dump") else (p.dict() if hasattr(p, "dict") else str(p))
+                            for p in detected_pii
+                        ]
+
+                        yield format_sse("guardrail_route", {
+                            "classification": node_out.get("intent", "safe_rag"),
+                            "confidence": getattr(decision, "confidence", 1.0) if decision else 1.0,
+                            "reasoning": getattr(decision, "reasoning", "") if decision else "",
+                            "pii_redacted": pii_redacted,
+                            "detected_pii": pii_serialized,
+                            "masked_query": masked_query
+                        })
+
+                    # 2. Hybrid Retrieval Stage (Top-4 Chunks & FlashRank Rerank Scores)
+                    elif node_name == "retrieve":
+                        chunks = node_out.get("retrieved_chunks", [])
+                        top_4 = chunks[:4]
+                        serialized_chunks = []
+                        for c in top_4:
+                            serialized_chunks.append({
+                                "content": c.get("content", ""),
+                                "score": round(float(c.get("score", 0.0)), 4),
+                                "source": c.get("metadata", {}).get("source", "Knowledge Base"),
+                                "metadata": c.get("metadata", {})
+                            })
+
+                        yield format_sse("retrieval_results", {
+                            "count": len(serialized_chunks),
+                            "chunks": serialized_chunks,
+                            "top_scores": [c["score"] for c in serialized_chunks],
+                            "sources": [c["source"] for c in serialized_chunks]
+                        })
+
+                    # 3. CRAG Document Relevance Grading Stage
+                    elif node_name == "grade_documents":
+                        grade = node_out.get("grade_result")
+                        is_relevant = getattr(grade, "is_relevant", True) if grade else True
+                        score = getattr(grade, "score", 1.0) if grade else 1.0
+                        reasoning = getattr(grade, "reasoning", "") if grade else ""
+
+                        yield format_sse("crag_grade", {
+                            "is_relevant": is_relevant,
+                            "score": round(float(score), 4),
+                            "retry_count": retry_count,
+                            "reasoning": reasoning
+                        })
+
+                    # Query Reformulation (Track CRAG retry loop)
+                    elif node_name == "rewrite_query":
+                        retry_count = node_out.get("retry_count", retry_count + 1)
+
+                    # 4. Final Response Generation
+                    elif node_name == "generate":
+                        response_text = node_out.get("response", "")
+                        needs_esc = node_out.get("needs_escalation", False)
+                        if not needs_esc:
+                            final_response_emitted = True
+                            yield format_sse("final_response", {
+                                "response": response_text,
+                                "intent": "safe_rag",
+                                "status": "success"
+                            })
+
+                    elif node_name == "safe_refusal":
+                        response_text = node_out.get("response", "Request refused by security guardrails.")
+                        final_response_emitted = True
+                        yield format_sse("final_response", {
+                            "response": response_text,
+                            "intent": "prompt_injection",
+                            "status": "success"
+                        })
+
+                    elif node_name == "live_order_tool":
+                        response_text = node_out.get("response", "")
+                        order_data = node_out.get("order_data")
+                        final_response_emitted = True
+                        yield format_sse("final_response", {
+                            "response": response_text,
+                            "intent": "live_order_tool",
+                            "order_data": order_data,
+                            "status": "success"
+                        })
+
+                    elif node_name == "human_review_node":
+                        response_text = node_out.get("response", "")
+                        final_response_emitted = True
+                        yield format_sse("final_response", {
+                            "response": response_text,
+                            "intent": "human_review",
+                            "status": "success"
+                        })
+
+            # Check if execution paused before human_review_node (HITL Interrupt)
+            snapshot = graph_app.get_state(config)
+            if snapshot and snapshot.next:
+                state_vals = snapshot.values or {}
+                escalation_resp = state_vals.get("response") or "This query has been escalated to a human supervisor."
+                intent_val = state_vals.get("intent", "escalation_hitl")
+
+                reason = "Interrupted for Human Review"
+                if state_vals.get("route_decision"):
+                    reason = getattr(state_vals["route_decision"], "reasoning", reason)
+                elif state_vals.get("retry_count", 0) >= 1 and state_vals.get("grade_result") and not state_vals.get("grade_result").is_relevant:
+                    reason = "CRAG retrieval failed after reformulation; supervisor review needed."
+
+                yield format_sse("hitl_paused", {
+                    "thread_id": request.thread_id,
+                    "paused": True,
+                    "reason": reason,
+                    "response": escalation_resp,
+                    "intent": intent_val,
+                    "status": "escalated"
+                })
+
+                if not final_response_emitted:
+                    final_response_emitted = True
+                    yield format_sse("final_response", {
+                        "response": escalation_resp,
+                        "intent": intent_val,
+                        "status": "escalated"
+                    })
+
+            # Stage: done
+            yield format_sse("done", {
+                "thread_id": request.thread_id,
+                "status": "escalated" if (snapshot and snapshot.next) else "success"
+            })
+
+        except Exception as e:
+            yield format_sse("error", {"detail": str(e)})
+            yield format_sse("done", {"thread_id": request.thread_id, "status": "error"})
+        finally:
+            if handler:
+                await aflush_langfuse(handler)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @server.post("/api/chat/resume", response_model=ChatResponse)
 @server.post("/chat/resume", response_model=ChatResponse)
-async def resume_chat(request: ResumeRequest):
+async def resume_chat(request: ResumeRequest, background_tasks: BackgroundTasks):
     """
     Resumes a thread paused at human_review_node with supervisor response override.
     """
-    config = {"configurable": {"thread_id": request.thread_id}}
+    handler = get_langfuse_callback(
+        session_id=request.thread_id,
+        metadata={"thread_id": request.thread_id, "endpoint": "/api/chat/resume", "action": "resume"}
+    )
+    callbacks = [handler] if handler else []
+    config = {
+        "configurable": {"thread_id": request.thread_id},
+        "callbacks": callbacks,
+        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id}
+    }
     
     try:
         snapshot = graph_app.get_state(config)
@@ -94,6 +319,9 @@ async def resume_chat(request: ResumeRequest):
         new_snapshot = graph_app.get_state(config)
         status = "escalated" if (new_snapshot and new_snapshot.next) else "success"
         
+        if handler:
+            background_tasks.add_task(flush_langfuse, handler)
+
         return ChatResponse(
             response=result.get("response", override),
             intent=result.get("intent", "human_review"),
@@ -102,8 +330,12 @@ async def resume_chat(request: ResumeRequest):
             status=status
         )
     except HTTPException:
+        if handler:
+            background_tasks.add_task(flush_langfuse, handler)
         raise
     except Exception as e:
+        if handler:
+            background_tasks.add_task(flush_langfuse, handler)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

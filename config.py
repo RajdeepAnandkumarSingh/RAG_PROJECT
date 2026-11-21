@@ -16,4 +16,9 @@ class Settings(BaseSettings):
     BM25_INDEX_PATH: str = Field(default="data/bm25_index.pkl")
     RERANKER_MODEL: str = Field(default="ms-marco-MiniLM-L-12-v2")
 
+    # Langfuse Cloud Observability
+    LANGFUSE_PUBLIC_KEY: str = Field(default="")
+    LANGFUSE_SECRET_KEY: str = Field(default="")
+    LANGFUSE_BASE_URL: str = Field(default="https://cloud.langfuse.com")
+
 settings = Settings()
