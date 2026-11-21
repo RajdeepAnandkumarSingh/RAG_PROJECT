@@ -6,6 +6,7 @@ from pydantic_settings import SettingsConfigDict
 from config import settings, Settings
 from schemas.routing import RouteDecision
 from utils.pii_scrubber import redact_pii
+from utils.order_db import init_orders_table
 from main import (
     AgentState,
     guardrail_and_router_node,
@@ -124,7 +125,7 @@ def test_path_1_prompt_injection():
 
 
 def test_path_2_escalation_hitl():
-    """Verify escalation_hitl flags needs_escalation and routes to human_review."""
+    """Verify escalation_hitl flags needs_escalation and routes to human_review_node."""
     async def _test():
         mock_decision = RouteDecision(
             classification="escalation_hitl",
@@ -151,16 +152,18 @@ def test_path_2_escalation_hitl():
             assert res["needs_escalation"] is True
             assert "escalated to a human supervisor" in res["response"]
             
-            # Verify route_after_guardrail directs to human_review
+            # Verify route_after_guardrail directs to human_review_node
             next_step = route_after_guardrail(res)
-            assert next_step == "human_review"
+            assert next_step == "human_review_node"
 
     run_async(_test())
 
 
 def test_path_3_live_order_tool():
-    """Verify live_order_tool routes to tool node without ChromaDB."""
+    """Verify live_order_tool routes to tool node and looks up real seeded order without ChromaDB."""
     async def _test():
+        init_orders_table(settings.SQLITE_DB_PATH)
+
         mock_decision = RouteDecision(
             classification="live_order_tool",
             reasoning="Customer tracking order status"
@@ -170,8 +173,8 @@ def test_path_3_live_order_tool():
         mock_router.return_value = mock_decision
         with patch("main.router_llm", mock_router):
             state: AgentState = {
-                "query": "Where is my package #84920?",
-                "user_query": "Where is my package #84920?",
+                "query": "Where is my package #7721?",
+                "user_query": "Where is my package #7721?",
                 "masked_query": "",
                 "intent": "",
                 "route_decision": None,
@@ -189,9 +192,9 @@ def test_path_3_live_order_tool():
             next_step = route_after_guardrail(res)
             assert next_step == "live_order_tool"
 
-            # Execute tool node
+            # Execute tool node using real seeded order #7721
             tool_res = await live_order_tool_node(res)
-            assert "#84920" in tool_res["response"]
+            assert "#7721" in tool_res["response"]
             assert "In Transit" in tool_res["response"]
 
     run_async(_test())
@@ -233,13 +236,13 @@ def test_path_4_safe_rag():
 
 # --- 5. Graph Topology & Entry Point Verification ---
 def test_graph_entry_point_and_structure():
-    """Verify that START points directly to guardrail_and_router."""
+    """Verify that START points directly to guardrail_and_router and human_review_node is registered."""
     assert "guardrail_and_router" in workflow.nodes
     assert "safe_refusal" in workflow.nodes
     assert "live_order_tool" in workflow.nodes
     assert "retrieve" in workflow.nodes
     assert "generate" in workflow.nodes
-    assert "human_review" in workflow.nodes
+    assert "human_review_node" in workflow.nodes
 
 
 # --- 6. End-to-End Graph Execution with Mocks for All 4 Paths ---
@@ -271,7 +274,7 @@ def test_full_graph_prompt_injection_execution():
 
 
 def test_full_graph_escalation_hitl_execution():
-    """Verify that escalation_hitl pauses at human_review interrupt."""
+    """Verify that escalation_hitl pauses at human_review_node interrupt."""
     async def _test():
         mock_decision = RouteDecision(
             classification="escalation_hitl",
@@ -288,8 +291,8 @@ def test_full_graph_escalation_hitl_execution():
             )
             
             snapshot = app.get_state(config)
-            # Crucial requirement 5: Graph must be interrupted before human_review
-            assert "human_review" in snapshot.next
+            # Crucial requirement 5: Graph must be interrupted before human_review_node
+            assert "human_review_node" in snapshot.next
 
     run_async(_test())
 
