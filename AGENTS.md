@@ -5,4 +5,5 @@
   - Enforce structured JSON outputs via Pydantic `BaseModel` with `.with_structured_output()`.
   - Never hardcode API keys; always read from `.env` via `pydantic-settings`.
   - Keep existing React UI styling intact while adding live SSE status updates to the Retrieval Inspector.
-- **Verification**: Always write `pytest` unit tests for new LangGraph nodes and run them in the terminal before committing.
+  - Never execute terminal or pytest commands automatically; edit files and let the user run verification commands.
+- **Verification**: Always write `pytest` unit tests for new LangGraph nodes and let the user run verification commands. Never execute terminal or pytest commands automatically; edit files and let the user run verification commands.

@@ -1,9 +1,8 @@
 import streamlit as st
 import os
-from main import query_bot, app, AgentState
-from dotenv import load_dotenv
-
-load_dotenv()
+import asyncio
+from main import app, AgentState
+from config import settings
 
 st.set_page_config(page_title="RAG Support Assistant", layout="wide")
 
@@ -43,7 +42,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 st.title("🛡️ RAG Support Assistant")
-st.caption("LangGraph + ChromaDB + Groq Llama 3.3")
+st.caption(f"LangGraph + ChromaDB + Groq ({settings.GROQ_MODEL_ROUTER} / {settings.GROQ_MODEL_GENERATOR})")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -59,6 +58,16 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+async def execute_graph(user_prompt: str, config: dict):
+    final_state = None
+    async for event in app.astream(
+        {"query": user_prompt, "user_query": user_prompt},
+        config,
+        stream_mode="values"
+    ):
+        final_state = event
+    return final_state
+
 if prompt := st.chat_input("Ask a customer support question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -66,15 +75,10 @@ if prompt := st.chat_input("Ask a customer support question..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking and retrieving..."):
-            # Execute the graph logic
             config = {"configurable": {"thread_id": "streamlit_user"}}
             
-            # Initial query
-            events = app.stream({"query": prompt}, config, stream_mode="values")
-            
-            final_state = None
-            for event in events:
-                final_state = event
+            # Execute the async graph logic
+            final_state = asyncio.run(execute_graph(prompt, config))
             
             # Check for HITL
             snapshot = app.get_state(config)
