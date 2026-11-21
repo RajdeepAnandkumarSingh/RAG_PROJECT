@@ -1,13 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from main import app as graph_app
 from config import settings
 
 server = FastAPI(
     title="Nexus RAG v2.0 API",
-    description="Customer Support RAG with Pre-Retrieval Guardrails, Structured Routing, and HITL"
+    description="Customer Support RAG with Pre-Retrieval Guardrails, Hybrid Search (ChromaDB + BM25), Local Reranking, and HITL"
 )
 
 # Enable CORS for React frontend
@@ -26,6 +26,7 @@ class ChatResponse(BaseModel):
     response: str
     intent: str
     context: List[str]
+    retrieved_chunks: Optional[List[Dict[str, Any]]] = None
     status: str  # "success" or "escalated"
 
 @server.post("/ask", response_model=ChatResponse)
@@ -47,6 +48,7 @@ async def ask_query(request: QueryRequest):
             response=result.get("response", "Escalated to human supervisor."),
             intent=result.get("intent", "Unknown"),
             context=result.get("context", []),
+            retrieved_chunks=result.get("retrieved_chunks", []),
             status=status
         )
     except Exception as e:

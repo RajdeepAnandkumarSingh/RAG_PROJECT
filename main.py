@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from config import settings
 from schemas.routing import RouteDecision
 from utils.pii_scrubber import redact_pii
+from utils.hybrid_retriever import HybridRetriever
 
 # 1. Define Agent State
 class AgentState(TypedDict):
@@ -23,6 +24,7 @@ class AgentState(TypedDict):
     intent: str
     route_decision: Optional[RouteDecision]
     context: List[str]
+    retrieved_chunks: Optional[List[dict]]
     response: str
     needs_escalation: bool
     human_feedback: Optional[str]
@@ -40,6 +42,22 @@ def get_vector_db():
             embedding_function=embeddings
         )
     return _vector_db
+
+# Lazy Hybrid Retriever Singleton
+_hybrid_retriever = None
+
+def get_hybrid_retriever() -> HybridRetriever:
+    global _hybrid_retriever
+    current_db = get_vector_db()
+    if _hybrid_retriever is None:
+        _hybrid_retriever = HybridRetriever(
+            chroma_db=current_db,
+            bm25_path=settings.BM25_INDEX_PATH,
+            reranker_model=settings.RERANKER_MODEL
+        )
+    else:
+        _hybrid_retriever.chroma_db = current_db
+    return _hybrid_retriever
 
 # Router LLM using openai/gpt-oss-20b with structured JSON output
 router_llm = ChatGroq(
@@ -72,7 +90,7 @@ async def guardrail_and_router_node(state: AgentState) -> dict:
     Entry Point Node:
     1. Applies regex/PII masking to redact emails, phone numbers, and card numbers.
     2. Invokes Groq router LLM (openai/gpt-oss-20b) with Pydantic structured output.
-    3. Handles prompt_injection immediately without touching ChromaDB.
+    3. Handles prompt_injection immediately without touching vector DB / BM25.
     """
     raw_query = state.get("user_query") or state.get("query", "")
     masked_query, detected_pii = redact_pii(raw_query)
@@ -92,7 +110,8 @@ async def guardrail_and_router_node(state: AgentState) -> dict:
         "masked_query": masked_query,
         "intent": classification,
         "route_decision": decision,
-        "context": []
+        "context": [],
+        "retrieved_chunks": []
     }
 
     if classification == "prompt_injection":
@@ -117,10 +136,11 @@ async def guardrail_and_router_node(state: AgentState) -> dict:
     return base_state
 
 async def safe_refusal_node(state: AgentState) -> dict:
-    """Safe refusal node that terminates execution without accessing ChromaDB."""
+    """Safe refusal node that terminates execution without accessing retrieval indices."""
     return {
         "response": state.get("response") or "I cannot fulfill this request as it violates safety guidelines or attempts prompt manipulation.",
-        "context": []
+        "context": [],
+        "retrieved_chunks": []
     }
 
 async def live_order_tool_node(state: AgentState) -> dict:
@@ -138,23 +158,39 @@ async def live_order_tool_node(state: AgentState) -> dict:
     
     return {
         "response": response,
-        "context": []
+        "context": [],
+        "retrieved_chunks": []
     }
 
 async def retrieve_node(state: AgentState) -> dict:
-    """Retrieves relevant context from ChromaDB using masked_query in a non-blocking thread."""
+    """
+    Retrieves top chunks using async HybridRetriever:
+    - Dense ChromaDB top-15 + Sparse BM25 top-15 concurrently in worker threads.
+    - Merges with Reciprocal Rank Fusion (k=60).
+    - Reranks locally using FlashRank (ms-marco-MiniLM-L-12-v2) to top 4 chunks.
+    - Enriches graph state with retrieved_chunks and formatted context.
+    """
     query = state.get("masked_query") or state.get("query", "")
+    retriever = get_hybrid_retriever()
     
-    def do_similarity_search():
-        db = get_vector_db()
-        return db.similarity_search(query, k=3)
-
-    results = await asyncio.to_thread(do_similarity_search)
-    context = [res.page_content + "\nSuggested Response: " + res.metadata.get('response', '') for res in results]
-    return {"context": context}
+    chunks = await retriever.aretrieve(query)
+    
+    context = []
+    for c in chunks:
+        content = c.get("content", "")
+        meta = c.get("metadata", {})
+        score = c.get("score", 0.0)
+        source = meta.get("source", "Knowledge Base")
+        suggested = f"\nSuggested Response: {meta['response']}" if meta.get("response") else ""
+        context.append(f"[Source: {source} | Score: {score:.4f}]\n{content}{suggested}")
+    
+    return {
+        "context": context,
+        "retrieved_chunks": chunks
+    }
 
 async def generate_node(state: AgentState) -> dict:
-    """Generates a response using openai/gpt-oss-120b and retrieved context."""
+    """Generates a response using openai/gpt-oss-120b and retrieved hybrid context."""
     query = state.get("masked_query") or state.get("query", "")
     context = "\n---\n".join(state.get("context", []))
     
@@ -267,7 +303,7 @@ def query_bot(query: str, thread_id: str = "1"):
         return asyncio.run(aquery_bot(query, thread_id))
 
 if __name__ == "__main__":
-    print("=== Customer Support RAG Assistant (LangGraph + HITL + Pre-Retrieval Guardrails) ===")
+    print("=== Customer Support RAG Assistant (LangGraph + HITL + Hybrid Search + FlashRank) ===")
     print("Type 'exit' to quit.")
     
     while True:

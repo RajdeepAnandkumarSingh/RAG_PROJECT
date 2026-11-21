@@ -8,3 +8,5 @@ pandas
 python-dotenv
 sentence-transformers
 chromadb
+rank-bm25
+flashrank
