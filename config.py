@@ -21,4 +21,9 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = Field(default="")
     LANGFUSE_BASE_URL: str = Field(default="https://cloud.langfuse.com")
 
+    # Redis Semantic Cache
+    REDIS_URL: str = Field(default="redis://localhost:6379/0")
+    SEMANTIC_CACHE_TTL: int = Field(default=86400)
+    SEMANTIC_CACHE_THRESHOLD: float = Field(default=0.92)
+
 settings = Settings()

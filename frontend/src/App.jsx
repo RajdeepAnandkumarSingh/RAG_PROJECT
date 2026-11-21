@@ -22,6 +22,7 @@ function App() {
 
   // Stage tracking for Retrieval Inspector
   const [activeStages, setActiveStages] = useState({
+    cache: { status: 'idle', hit: false, similarity: 0, matchedQuery: '' },
     guardrail: { status: 'idle', classification: '', pii_redacted: false },
     retrieval: { status: 'idle', count: 0 },
     crag: { status: 'idle', is_relevant: null, score: 0, retry_count: 0 },
@@ -48,7 +49,8 @@ function App() {
 
     // Reset inspector stages for new query execution
     setActiveStages({
-      guardrail: { status: 'running', classification: '', pii_redacted: false },
+      cache: { status: 'running', hit: false, similarity: 0, matchedQuery: '' },
+      guardrail: { status: 'idle', classification: '', pii_redacted: false },
       retrieval: { status: 'idle', count: 0 },
       crag: { status: 'idle', is_relevant: null, score: 0, retry_count: 0 },
       hitl: { isPaused: false, reason: '', threadId }
@@ -104,11 +106,28 @@ function App() {
           if (!dataJson) continue;
 
           // Process Stage Events
-          if (eventName === "guardrail_route" || dataJson.event === "guardrail_route") {
+          if (eventName === "cache_hit" || dataJson.event === "cache_hit") {
+            const similarity = dataJson.similarity || 1.0;
+            const matchedQuery = dataJson.matched_query || dataJson.query || "";
+            const chunks = dataJson.chunks || [];
+            if (chunks.length > 0) {
+              setRetrievedChunks(chunks);
+            }
+            setActiveStages(prev => ({
+              ...prev,
+              cache: {
+                status: 'hit',
+                hit: true,
+                similarity: similarity,
+                matchedQuery: matchedQuery
+              }
+            }));
+          } else if (eventName === "guardrail_route" || dataJson.event === "guardrail_route") {
             const classification = dataJson.classification || "safe_rag";
             setIntent(classification);
             setActiveStages(prev => ({
               ...prev,
+              cache: prev.cache.hit ? prev.cache : { status: 'miss', hit: false, similarity: 0, matchedQuery: '' },
               guardrail: {
                 status: classification === 'prompt_injection' ? 'flagged' : 'completed',
                 classification,

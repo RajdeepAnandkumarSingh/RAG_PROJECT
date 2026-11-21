@@ -4,7 +4,7 @@ import {
   Activity, Shield, Database, Cpu, 
   CheckCircle, AlertTriangle, UserCheck, 
   Send, Layers, Sparkles, RefreshCw, 
-  FileText, CornerDownRight 
+  FileText, CornerDownRight, Zap 
 } from 'lucide-react';
 
 export default function RetrievalInspector({
@@ -89,6 +89,50 @@ export default function RetrievalInspector({
               {activeStages?.guardrail?.pii_redacted && (
                 <div className="mt-1 flex items-center gap-1 text-[9px] font-mono text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
                   <AlertTriangle className="w-3 h-3" /> PII Redacted
+                </div>
+              )}
+            </div>
+
+            {/* Semantic Cache Node */}
+            <div className={`p-3 rounded-xl border transition-all ${
+              activeStages?.cache?.status === 'hit'
+                ? 'bg-accent-emerald/10 border-accent-emerald/40 shadow-sm shadow-accent-emerald/10'
+                : activeStages?.cache?.status === 'running'
+                ? 'bg-primary/10 border-primary/40 animate-pulse'
+                : activeStages?.cache?.status === 'miss'
+                ? 'bg-white/5 border-white/10'
+                : 'bg-white/5 border-white/5 opacity-50'
+            }`}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] font-bold text-gray-300 flex items-center gap-1.5">
+                  <Zap className={`w-3.5 h-3.5 ${activeStages?.cache?.status === 'hit' ? 'text-accent-emerald animate-pulse' : 'text-amber-400'}`} /> 
+                  Semantic Cache
+                </span>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono uppercase font-semibold ${
+                  activeStages?.cache?.status === 'hit'
+                    ? 'bg-accent-emerald/20 text-accent-emerald border border-accent-emerald/30'
+                    : activeStages?.cache?.status === 'miss'
+                    ? 'bg-white/10 text-gray-400 border border-white/10'
+                    : activeStages?.cache?.status === 'running'
+                    ? 'bg-primary/20 text-primary-light border border-primary/30'
+                    : 'bg-white/5 text-gray-500 border border-white/5'
+                }`}>
+                  {activeStages?.cache?.status === 'hit'
+                    ? `HIT (${Math.round((activeStages?.cache?.similarity || 0) * 100)}%)`
+                    : activeStages?.cache?.status === 'miss'
+                    ? 'MISS'
+                    : activeStages?.cache?.status === 'running'
+                    ? 'LOOKUP'
+                    : 'IDLE'}
+                </span>
+              </div>
+              {activeStages?.cache?.status === 'hit' && (
+                <div 
+                  className="mt-1 flex items-center gap-1 text-[9px] font-mono text-accent-emerald bg-accent-emerald/10 px-2 py-0.5 rounded border border-accent-emerald/20 truncate" 
+                  title={`Matched: ${activeStages?.cache?.matchedQuery || ''}`}
+                >
+                  <CheckCircle className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">Bypassed LLM & Retrieval</span>
                 </div>
               )}
             </div>

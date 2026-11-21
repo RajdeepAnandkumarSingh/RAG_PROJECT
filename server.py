@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from main import app as graph_app
 from config import settings
 from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
+from utils.semantic_cache import get_semantic_cache
 
 server = FastAPI(
     title="Nexus RAG v2.0 API",
@@ -47,6 +48,18 @@ def format_sse(event_name: str, payload: Dict[str, Any]) -> str:
 
 @server.post("/ask", response_model=ChatResponse)
 async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
+    # 1. Semantic Cache check (Bypasses retrieval and LLM on hit)
+    cache = get_semantic_cache()
+    cached_result = await cache.lookup(request.query)
+    if cached_result and cached_result.get("hit"):
+        return ChatResponse(
+            response=cached_result.get("response", ""),
+            intent=cached_result.get("intent", "safe_rag"),
+            context=cached_result.get("context", []),
+            retrieved_chunks=cached_result.get("retrieved_chunks", []),
+            status="success"
+        )
+
     handler = get_langfuse_callback(
         session_id=request.thread_id,
         metadata={"thread_id": request.thread_id, "endpoint": "/ask"}
@@ -69,6 +82,17 @@ async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
         snapshot = graph_app.get_state(config)
         status = "escalated" if (snapshot and snapshot.next) else "success"
         
+        # Asynchronously cache successful safe_rag responses in the background
+        if result.get("intent") == "safe_rag" and status == "success":
+            background_tasks.add_task(
+                cache.set,
+                query=request.query,
+                response=result.get("response", ""),
+                intent="safe_rag",
+                context=result.get("context", []),
+                retrieved_chunks=result.get("retrieved_chunks", [])
+            )
+
         if handler:
             background_tasks.add_task(flush_langfuse, handler)
             
@@ -106,8 +130,61 @@ async def chat_stream(request: QueryRequest):
     async def event_generator() -> AsyncGenerator[str, None]:
         retry_count = 0
         final_response_emitted = False
+        collected_chunks = []
+        collected_context = []
 
         try:
+            # 1. Semantic Cache Check (Bypasses retrieval and LLM synthesis on hit)
+            cache = get_semantic_cache()
+            cached_result = await cache.lookup(request.query)
+            if cached_result and cached_result.get("hit"):
+                similarity = round(float(cached_result.get("similarity", 1.0)), 4)
+                cached_chunks = cached_result.get("retrieved_chunks", [])
+                top_chunks = cached_chunks[:4] if cached_chunks else []
+
+                # Emit cache_hit SSE event to Retrieval Inspector UI
+                yield format_sse("cache_hit", {
+                    "hit": True,
+                    "query": request.query,
+                    "matched_query": cached_result.get("query", ""),
+                    "similarity": similarity,
+                    "response": cached_result.get("response", ""),
+                    "chunks": top_chunks
+                })
+
+                # Emit safe_rag routing event reflecting cache bypass
+                yield format_sse("guardrail_route", {
+                    "classification": "safe_rag",
+                    "confidence": 1.0,
+                    "reasoning": f"Semantic cache hit ({similarity * 100:.1f}% match). Retrieval and LLM generation bypassed.",
+                    "pii_redacted": False,
+                    "detected_pii": [],
+                    "masked_query": request.query
+                })
+
+                # Emit cached chunks if available
+                if top_chunks:
+                    yield format_sse("retrieval_results", {
+                        "count": len(top_chunks),
+                        "chunks": top_chunks,
+                        "top_scores": [c.get("score", 1.0) for c in top_chunks],
+                        "sources": [c.get("source", "Cached Knowledge Base") for c in top_chunks]
+                    })
+
+                # Emit final response from cache
+                yield format_sse("final_response", {
+                    "response": cached_result.get("response", ""),
+                    "intent": "safe_rag",
+                    "status": "success"
+                })
+
+                # Emit completion
+                yield format_sse("done", {
+                    "thread_id": request.thread_id,
+                    "status": "success"
+                })
+                return
+
             # Stream execution stage-by-stage using LangGraph updates
             async for update in graph_app.astream(
                 {"query": request.query, "user_query": request.query},
@@ -146,6 +223,8 @@ async def chat_stream(request: QueryRequest):
                     # 2. Hybrid Retrieval Stage (Top-4 Chunks & FlashRank Rerank Scores)
                     elif node_name == "retrieve":
                         chunks = node_out.get("retrieved_chunks", [])
+                        collected_chunks = chunks
+                        collected_context = node_out.get("context", [])
                         top_4 = chunks[:4]
                         serialized_chunks = []
                         for c in top_4:
@@ -187,6 +266,14 @@ async def chat_stream(request: QueryRequest):
                         needs_esc = node_out.get("needs_escalation", False)
                         if not needs_esc:
                             final_response_emitted = True
+                            # Asynchronously store generated response into semantic cache
+                            asyncio.create_task(cache.set(
+                                query=request.query,
+                                response=response_text,
+                                intent="safe_rag",
+                                context=collected_context or node_out.get("context", []),
+                                retrieved_chunks=collected_chunks or node_out.get("retrieved_chunks", [])
+                            ))
                             yield format_sse("final_response", {
                                 "response": response_text,
                                 "intent": "safe_rag",

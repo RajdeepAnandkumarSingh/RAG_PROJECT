@@ -11,3 +11,12 @@ chromadb
 rank-bm25
 flashrank
 langfuse>=2.0.0
+redis>=5.0.0
+numpy
+ragas>=0.1.0
+datasets
+pytest
+pytest-asyncio
+httpx
+uvicorn
+fastapi
