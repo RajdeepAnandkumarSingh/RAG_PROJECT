@@ -1,59 +1,48 @@
-# =====================================================================
-# Stage 1: Build stage with dependencies and wheels
-# =====================================================================
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim
 
 WORKDIR /app
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PORT=7860
 
-# Install build dependencies
+# Install system dependencies (curl for healthcheck and model downloads)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Set up dedicated user (UID 1000) for Hugging Face Spaces compatibility
+RUN useradd -m -u 1000 user && \
+    mkdir -p /app/data /app/chroma_db && \
+    chown -R user:user /app
+
+# Install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install dependencies into user directory
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Copy backend codebase
+COPY server.py main.py ingest.py config.py Customer_Support_Training_Dataset.csv ./
+COPY schemas/ ./schemas/
+COPY utils/ ./utils/
+COPY docs/ ./docs/
+COPY evals/ ./evals/
 
-# =====================================================================
-# Stage 2: Production runtime stage
-# =====================================================================
-FROM python:3.12-slim AS runner
+# Ensure all application files and home directory are owned by user
+RUN chown -R user:user /app /home/user
 
-WORKDIR /app
+# Switch to non-root user (UID 1000 for Hugging Face Spaces)
+USER user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
 
-ENV PYTHONUNBUFFERED=1
-ENV PATH=/home/nexus/.local/bin:$PATH
+# Pre-bake SQLite DB, ChromaDB, BM25 index, and HuggingFace/FlashRank model caches during build time
+RUN python ingest.py
 
-# Install runtime dependencies (curl for healthcheck)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+EXPOSE 7860
 
-# Create dedicated non-root application user and persist directories
-RUN useradd -m -u 1000 -s /bin/bash nexus && \
-    mkdir -p /app/chroma_db /app/data && \
-    chown -R nexus:nexus /app
-
-# Copy installed python wheels from builder
-COPY --from=builder --chown=nexus:nexus /root/.local /home/nexus/.local
-
-# Copy application source code
-COPY --chown=nexus:nexus . .
-
-USER nexus
-
-EXPOSE 8000
-
-# Healthcheck probing FastAPI documentation endpoint
+# Healthcheck probing FastAPI documentation endpoint on port 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/docs || exit 1
+    CMD curl -f http://localhost:7860/docs || exit 1
 
 # Start non-blocking FastAPI ASGI server
-CMD ["uvicorn", "server:server", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "7860"]

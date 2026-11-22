@@ -1,4 +1,0 @@
-Nexus Enterprise Cloud Migration Guidelines.
-All departmental cloud migrations must be scheduled during the designated maintenance window.
-Data backups must be completed 24 hours prior to cutover.
-For rollback procedures, contact the infrastructure team at extension 4040.

@@ -310,6 +310,16 @@ def run_full_ingestion():
 
     # 2. Documents & PDFs -> ChromaDB + BM25
     ingest_documents_dual_index()
+
+    # 3. Pre-cache FlashRank local cross-encoder model for container pre-baking
+    try:
+        from flashrank import Ranker
+        print(f"[Model Pre-bake] Pre-caching FlashRank model ({settings.RERANKER_MODEL})...")
+        Ranker(model_name=settings.RERANKER_MODEL)
+        print(f"[Model Pre-bake] FlashRank model ({settings.RERANKER_MODEL}) cached successfully.")
+    except Exception as e:
+        print(f"[Model Pre-bake] FlashRank caching notice: {e}")
+
     print("=== Nexus Ingestion Pipeline Complete ===")
 
 

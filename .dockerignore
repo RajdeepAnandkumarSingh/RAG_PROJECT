@@ -1,0 +1,17 @@
+frontend/
+.git/
+.gitignore
+.env
+*.env
+__pycache__/
+*/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+tests/
+node_modules/

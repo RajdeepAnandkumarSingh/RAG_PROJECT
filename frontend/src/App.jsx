@@ -12,7 +12,8 @@ import {
 import RetrievalInspector from './components/RetrievalInspector';
 import PipelineArchitectureModal from './components/PipelineArchitectureModal';
 
-const API_URL = "http://localhost:8000";
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const API_URL = API_BASE_URL;
 
 const SHOWCASE_PRESETS = [
   { 
@@ -194,7 +195,7 @@ function App() {
   useEffect(() => {
     const fetchTelemetry = async () => {
       try {
-        const resp = await axios.get(`${API_URL}/api/telemetry`);
+        const resp = await axios.get(`${API_BASE_URL}/api/telemetry`);
         if (resp.data) {
           setTelemetry(resp.data);
         }
@@ -241,7 +242,7 @@ function App() {
     let botMessageCreated = false;
 
     try {
-      const response = await fetch(`${API_URL}/api/chat/stream`, {
+      const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery, thread_id: activeThread })
@@ -447,7 +448,7 @@ function App() {
     formData.append('file', file);
 
     try {
-      const resp = await axios.post(`${API_URL}/api/ingest/upload`, formData, {
+      const resp = await axios.post(`${API_BASE_URL}/api/ingest/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
@@ -496,7 +497,7 @@ function App() {
   const handleSupervisorResume = async (threadToResume, overrideMessage) => {
     setIsResuming(true);
     try {
-      const resp = await axios.post(`${API_URL}/api/chat/resume`, {
+      const resp = await axios.post(`${API_BASE_URL}/api/chat/resume`, {
         thread_id: threadToResume || threadId,
         response: overrideMessage
       });

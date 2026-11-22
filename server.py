@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import asyncio
@@ -18,11 +19,25 @@ server = FastAPI(
     title="Nexus RAG v2.0 API",
     description="Customer Support RAG with Langfuse Observability, SSE Streaming, Hybrid Search, FlashRank Reranker, CRAG, and HITL"
 )
+app = server  # ASGI callable alias for uvicorn server:app
 
-# Enable CORS for React frontend
+# Parse optional ALLOWED_ORIGINS env var (defaulting to ["*"] when unset)
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+if allowed_origins_env and allowed_origins_env != "*":
+    if allowed_origins_env.startswith("[") and allowed_origins_env.endswith("]"):
+        try:
+            allowed_origins = json.loads(allowed_origins_env)
+        except Exception:
+            allowed_origins = [o.strip() for o in allowed_origins_env.strip("[]").split(",") if o.strip()]
+    else:
+        allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = ["*"]
+
+# Enable CORS for React frontend (Vercel preview & production)
 server.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -624,4 +639,6 @@ async def upload_knowledge_file(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(server, host="0.0.0.0", port=8000)
+    # Respect PORT env var (defaulting to 7860 for Hugging Face Spaces or 8000 locally)
+    port = int(os.getenv("PORT", 7860 if os.getenv("SPACE_ID") else 8000))
+    uvicorn.run(server, host="0.0.0.0", port=port)
