@@ -1,7 +1,8 @@
 import json
 import asyncio
+from pathlib import Path
 from typing import List, Optional, Dict, Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -10,6 +11,7 @@ from main import app as graph_app
 from config import settings
 from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 from utils.semantic_cache import get_semantic_cache
+from ingest import process_uploaded_file
 
 server = FastAPI(
     title="Nexus RAG v2.0 API",
@@ -40,6 +42,17 @@ class ResumeRequest(BaseModel):
     thread_id: str = Field(..., description="The thread identifier of the paused conversation.")
     response: Optional[str] = Field(None, description="Direct supervisor response override.")
     feedback: Optional[str] = Field(None, description="Supervisor feedback or instructions.")
+
+class UploadResponse(BaseModel):
+    status: str
+    filename: str
+    file_type: str
+    chunks_indexed: int
+    tables_created: Optional[List[str]] = None
+    suggested_prompts: List[str]
+    message: str
+
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".md", ".txt"}
 
 def format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     """Formats event data into standard Server-Sent Events (SSE) string."""
@@ -424,6 +437,48 @@ async def resume_chat(request: ResumeRequest, background_tasks: BackgroundTasks)
         if handler:
             background_tasks.add_task(flush_langfuse, handler)
         raise HTTPException(status_code=500, detail=str(e))
+
+@server.post("/api/ingest/upload", response_model=UploadResponse)
+@server.post("/ingest/upload", response_model=UploadResponse)
+async def upload_knowledge_file(file: UploadFile = File(...)):
+    """
+    Live Multi-Format Organization Upload Endpoint:
+    - Accepts .pdf, .xlsx, .xls, .csv, .md, .txt
+    - Saves uploaded file to data/uploads/
+    - For text/pdf: chunks, upserts into existing ChromaDB collection safely,
+      rebuilds data/bm25_index.pkl, and hot-reloads HybridRetriever.
+    - For csv/excel: loads into data/nexus_structured.db via pandas and indexes schema summary.
+    - Generates 2-3 sample queries and returns them in suggested_prompts.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided.")
+
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{file_ext}'. Allowed formats: {', '.join(sorted(ALLOWED_UPLOAD_EXTENSIONS))}"
+        )
+
+    # 1. Save uploaded file to data/uploads/
+    upload_dir = Path("data/uploads")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = upload_dir / file.filename
+
+    try:
+        content = await file.read()
+        destination_path.write_bytes(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e}")
+
+    # 2. Process file asynchronously in background thread
+    try:
+        result = await asyncio.to_thread(process_uploaded_file, destination_path, file.filename)
+        return UploadResponse(**result)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error indexing file '{file.filename}': {e}")
 
 if __name__ == "__main__":
     import uvicorn

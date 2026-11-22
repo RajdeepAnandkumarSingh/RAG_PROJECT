@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-21T21:30:51.784516Z",
+  "timestamp": "2026-11-21T23:55:15.774291Z",
   "eval_dataset": "golden_dataset.json",
   "total_evaluated": 8,
   "models": {
@@ -7,10 +7,10 @@
     "embeddings": "all-MiniLM-L6-v2"
   },
   "summary": {
-    "faithfulness": 0.3556,
-    "answer_relevancy": 0.517,
-    "context_precision": 0.625,
-    "composite_score": 0.4992
+    "faithfulness": 0.9583,
+    "answer_relevancy": 0.8732,
+    "context_precision": 0.9896,
+    "composite_score": 0.9404
   },
   "details": [
     {
@@ -18,9 +18,9 @@
       "category": "returns",
       "question": "What is the return policy window for items purchased online?",
       "ground_truth": "Items purchased online can be returned within 30 days of delivery for a full refund, provided they are in their original, unused condition with all tags attached.",
-      "generated_answer": "The return window for items bought online is **30\u202fdays** from the date of purchase.  \n\nTo be eligible for a full refund or exchange, the merchandise must:\n\n- Be in its original packaging, unused, and include all accessories, manuals, and receipts.  \n- Not be a digital product, downloadable software, or a gift card (those are non\u2011refundable once delivered).\n\nIf you meet these conditions and return the item within the 30\u2011day period, we\u2019ll process the refund back to your original payment method within 3\u20135 business days after our warehouse inspects the return. If you have any further questions or need assistance starting a return, just let us know!",
-      "faithfulness": 0.8571,
-      "answer_relevancy": 0.8405,
+      "generated_answer": "For items purchased online, the return policy window allows returns within\u202f30\u202fdays of delivery.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 1.0,
       "context_precision": 1.0
     },
     {
@@ -28,9 +28,9 @@
       "category": "shipping",
       "question": "How long does standard domestic shipping take to arrive?",
       "ground_truth": "Standard domestic shipping typically takes 3 to 5 business days to arrive after processing.",
-      "generated_answer": "Standard domestic (contiguous United States) shipping with Nexus RAG takes **3\u20135 business days** from the time your order is dispatched. If you need faster delivery, we also offer Express Priority Shipping (1\u20132 business days). Let me know if you\u2019d like more details!",
-      "faithfulness": 0.6667,
-      "answer_relevancy": 0.7076,
+      "generated_answer": "Standard domestic shipping typically takes 3 to 5 business days to arrive after warehouse fulfillment and processing.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8495,
       "context_precision": 1.0
     },
     {
@@ -38,9 +38,9 @@
       "category": "orders",
       "question": "Can I cancel or change an order after it has been placed?",
       "ground_truth": "Orders can only be modified or canceled within 1 hour of placing the order before it enters the warehouse fulfillment stage.",
-      "generated_answer": "**Yes\u2014\u200bbut only if you act quickly.**  \n\n- **Cancellation:** You can cancel an order at no charge **as long as the request is made before the order is shipped**. Once the warehouse has dispatched the package, the order can\u2019t be cancelled on our end.  \n\n- **Changing the shipping address:** The shipping address can be edited **within 1\u202fhour of placing the order**, and only before the order is dispatched. After that window closes, the address is locked in.\n\n**What to do next**\n\n1. **Check the order status** in your account portal. If it still shows \u201cProcessing\u201d (i.e., not yet dispatched), you\u2019re still eligible to cancel or edit.  \n2. **Contact Billing/Support immediately** \u2013 either through the live chat or by emailing\u202fsupport@nexus.com \u2013 and let them know you\u2019d like to cancel or change the address. Provide your order number so they can locate it right away.  \n3. If the order has already shipped, you can still refuse the package on delivery or return it once it arrives (standard return policy applies).\n\nIf you\u2019re past the 1\u2011hour address\u2011change window or the order has already been dispatched, we won\u2019t be able to modify it, and you\u2019ll need to follow the regular return process after you receive the item. Let us know if you need help locating your order or opening a cancellation request, and we\u2019ll take care of it for you.",
-      "faithfulness": 0.3333,
-      "answer_relevancy": 0.8088,
+      "generated_answer": "Orders can be canceled or changed only within\u202f1\u202fhour of placing them and before the order enters warehouse fulfillment. After that 1\u2011hour window\u2014or once the order has been dispatched\u2014it cannot be altered and must be returned after delivery.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6756,
       "context_precision": 1.0
     },
     {
@@ -48,9 +48,9 @@
       "category": "warranty",
       "question": "What warranty coverage is included with hardware products?",
       "ground_truth": "All hardware products include a 1-year limited manufacturer warranty covering defects in materials and craftsmanship.",
-      "generated_answer": "**Warranty Coverage for Nexus Hardware Products**\n\n- **Duration:**\u202f1\u2011year limited manufacturer warranty.  \n- **What\u2019s covered:**\u202fHardware defects in materials and workmanship when the product is used under normal consumer conditions.  \n- **What\u2019s NOT covered:**\u202fAccidental damage, liquid ingress, any unauthorized third\u2011party modifications, and normal cosmetic wear\u2011and\u2011tear.  \n\n**If you need to file a claim:**  \n1. Locate your original order invoice.  \n2. Provide the device\u2019s serial number.  \n3. Contact Nexus Technical Support with those details.  \n\nWhen a defect is verified, Nexus will either supply a certified replacement unit or arrange a repair at no charge to you.  \n\nIf you have any additional questions or need assistance starting a warranty claim, just let us know!",
-      "faithfulness": 0.8,
-      "answer_relevancy": 0.7789,
+      "generated_answer": "Hardware products include a 1\u2011year limited manufacturer warranty that covers defects in materials and craftsmanship (or workmanship) under normal consumer use, but it does not cover accidental damage, liquid ingress, unauthorized modifications, or normal cosmetic wear.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8357,
       "context_precision": 1.0
     },
     {
@@ -58,40 +58,40 @@
       "category": "damaged_goods",
       "question": "What should I do if my package arrived damaged?",
       "ground_truth": "If your package arrives damaged, take photos of the packaging and items and contact support within 48 hours to receive a free replacement or full refund.",
-      "generated_answer": "**I\u2019m sorry to hear that your package arrived damaged.**\u202fWe\u2019ll get this sorted for you as quickly as possible.\n\n### What to do next\n\n1. **Gather the details**  \n   - Your order number.  \n   - A clear photo (or photos) showing the damage to the item and the packaging.  \n   - If the item is a hardware product, have the serial number handy.\n\n2. **Contact Nexus Support**  \n   - Open a ticket in the **Returns & Refunds** portal or reply to the order confirmation email with the information above.  \n   - Mention that the item arrived damaged so we can flag it as a defective return.\n\n3. **Prepare the return**  \n   - Pack the item **in its original packaging**, with all accessories, manuals, and the receipt/invoice.  \n   - Because the damage is our responsibility, **return shipping is free**\u2014we\u2019ll provide you with a prepaid shipping label.\n\n4. **Send it back**  \n   - Attach the prepaid label and drop the package off at the designated carrier (usually UPS, FedEx, or your local post office).  \n\n5. **Refund / replacement**  \n   - Once our warehouse inspects the returned package and confirms the damage, we\u2019ll process a **full refund to your original payment method** (or ship a replacement if you prefer).  \n   - Refunds are typically completed within **3\u20115 business days** after inspection.\n\n### A couple of quick reminders\n\n- The item must be **unused** (aside from the damage) and include **all accessories, manuals, and receipts** to qualify for the return.  \n- If the product is covered by the 1\u2011year limited warranty, you can also submit a warranty claim using the same order invoice and serial number; the process is identical for damaged shipments.\n\nIf you run into any trouble uploading photos or receiving the prepaid label, just let us know and we\u2019ll help you manually arrange the return.  \n\n**We\u2019re here to make this right\u2014please reach out with the requested info and we\u2019ll take it from there!**",
-      "faithfulness": 0.1875,
-      "answer_relevancy": 1.0,
-      "context_precision": 1.0
+      "generated_answer": "If your package arrived damaged, take clear photos of the packaging and the damaged items, then contact support within\u202f48\u202fhours (e.g., email\u202fsupport@nexus.io) to request a free replacement or a full refund; return shipping is free.",
+      "faithfulness": 0.6667,
+      "answer_relevancy": 0.9868,
+      "context_precision": 0.9167
     },
     {
       "id": 6,
       "category": "international",
       "question": "Do you offer international shipping, and are duties included?",
       "ground_truth": "We ship internationally to over 50 countries; customs duties and import taxes are calculated and collected at checkout so there are no surprise fees on delivery.",
-      "generated_answer": "No response generated.",
-      "faithfulness": 0.0,
-      "answer_relevancy": -0.0,
-      "context_precision": 0.0
+      "generated_answer": "We offer international shipping to over 50 countries, and all applicable customs duties and import taxes are calculated and collected at checkout under DDP terms, so there are no surprise fees upon delivery.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6862,
+      "context_precision": 1.0
     },
     {
       "id": 7,
       "category": "billing",
       "question": "What payment methods are accepted on the platform?",
       "ground_truth": "We accept major credit cards (Visa, MasterCard, American Express), PayPal, Apple Pay, and Google Pay.",
-      "generated_answer": "No response generated.",
-      "faithfulness": 0.0,
-      "answer_relevancy": 0.0,
-      "context_precision": 0.0
+      "generated_answer": "The platform accepts Visa, MasterCard, Discover, American\u202fExpress, PayPal, Apple\u202fPay, and Google\u202fPay; cash on delivery, money orders, personal checks, and wire transfers are not accepted.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.952,
+      "context_precision": 1.0
     },
     {
       "id": 8,
       "category": "exchanges",
       "question": "How do I initiate a product exchange for a different size?",
       "ground_truth": "To exchange an item for a different size, visit our Returns Portal, select 'Exchange for different size', print the prepaid shipping label, and drop off the package.",
-      "generated_answer": "No response generated.",
-      "faithfulness": 0.0,
-      "answer_relevancy": -0.0,
-      "context_precision": 0.0
+      "generated_answer": "To initiate a product exchange for a different size, go to the Returns Portal (returns.nexus.io), select \u201cExchange for different size,\u201d print the prepaid shipping label, and drop off the package with the carrier; the replacement will be dispatched immediately once the return carrier scans the package, and the exchange is free of charge within the 30\u2011day return window.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 1.0,
+      "context_precision": 1.0
     }
   ]
 }

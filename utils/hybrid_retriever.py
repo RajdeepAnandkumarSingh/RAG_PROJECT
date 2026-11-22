@@ -14,6 +14,16 @@ from config import settings
 
 logger = logging.getLogger("nexus.hybrid_retriever")
 
+try:
+    from flashrank import Ranker, RerankRequest
+except (ImportError, ModuleNotFoundError):
+    Ranker = None
+
+    class RerankRequest:
+        def __init__(self, query: str = None, passages: Optional[List[Dict[str, Any]]] = None, **kwargs):
+            self.query = query
+            self.passages = passages or []
+
 def tokenize_query(query: str) -> List[str]:
     """Tokenizes text into lowercase alphanumeric words for BM25 scoring."""
     return re.findall(r'\w+', query.lower())
@@ -32,6 +42,8 @@ class HybridRetriever:
     def __init__(
         self,
         chroma_db: Optional[Chroma] = None,
+        chroma_path: str = settings.CHROMA_PERSIST_DIRECTORY,
+        collection_name: str = settings.CHROMA_COLLECTION_NAME,
         bm25_path: str = settings.BM25_INDEX_PATH,
         reranker_model: str = settings.RERANKER_MODEL,
         dense_top_k: int = 15,
@@ -40,6 +52,8 @@ class HybridRetriever:
         final_top_k: int = 4
     ):
         self.chroma_db = chroma_db
+        self.chroma_path = chroma_path
+        self.collection_name = collection_name
         self.bm25_path = bm25_path
         self.reranker_model = reranker_model
         self.dense_top_k = dense_top_k
@@ -56,7 +70,8 @@ class HybridRetriever:
             return self.chroma_db
         embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
         self.chroma_db = Chroma(
-            persist_directory=settings.CHROMA_PERSIST_DIRECTORY,
+            collection_name=self.collection_name,
+            persist_directory=self.chroma_path,
             embedding_function=embeddings
         )
         return self.chroma_db
@@ -78,12 +93,20 @@ class HybridRetriever:
             logger.error(f"Failed to load BM25 index from {self.bm25_path}: {e}")
             return None
 
+    def reload_index(self):
+        """Forces in-memory reload of BM25 index and ChromaDB reference from disk."""
+        self._bm25_data = None
+        self.chroma_db = None
+        return self._load_bm25_index()
+
     def _get_ranker(self):
         """Lazy initializes FlashRank local cross-encoder ranker."""
         if self._ranker is not None:
             return self._ranker
+        if Ranker is None:
+            logger.warning("FlashRank module is not installed. Reranking will fallback to RRF order.")
+            return None
         try:
-            from flashrank import Ranker
             self._ranker = Ranker(model_name=self.reranker_model)
             return self._ranker
         except Exception as e:
@@ -211,7 +234,6 @@ class HybridRetriever:
         try:
             ranker = self._get_ranker()
             if ranker is not None:
-                from flashrank import RerankRequest
                 passages = [
                     {
                         "id": idx,
@@ -228,8 +250,18 @@ class HybridRetriever:
                     score_val = float(item.get("score", 0.0))
                     meta_dict = item.get("meta", {})
                     rrf_val = float(meta_dict.get("rrf_score", 0.0))
+
+                    # Preserve ranked passage text, fallback to candidate_docs if needed
+                    content = item.get("text")
+                    if content is None:
+                        idx = item.get("id")
+                        if isinstance(idx, int) and 0 <= idx < len(candidate_docs):
+                            content = candidate_docs[idx].page_content
+                        else:
+                            content = item.get("content", "")
+
                     results.append({
-                        "content": item["text"],
+                        "content": content,
                         "metadata": meta_dict,
                         "score": score_val,
                         "rerank_score": score_val,

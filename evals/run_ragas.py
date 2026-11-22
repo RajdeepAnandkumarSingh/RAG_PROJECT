@@ -28,6 +28,7 @@ async def run_pipeline_for_eval(questions: List[str]) -> Dict[str, List[Any]]:
     """
     Executes each question through the Nexus RAG pipeline asynchronously to gather
     actual generated answers and retrieved contexts for evaluation.
+    Handles LangGraph execution states, HITL interrupts, and web search fallback cleanly.
     """
     answers = []
     contexts_list = []
@@ -38,18 +39,59 @@ async def run_pipeline_for_eval(questions: List[str]) -> Dict[str, List[Any]]:
         try:
             config = {"configurable": {"thread_id": f"eval_thread_{idx}"}}
             res = await graph_app.ainvoke({"query": q, "user_query": q}, config)
-            ans = res.get("response", "No response generated.")
             
-            # Extract retrieved contexts
-            retrieved = res.get("context", [])
-            if not retrieved and res.get("retrieved_chunks"):
-                retrieved = [c.get("content", "") for c in res.get("retrieved_chunks", [])]
+            # Inspect thread checkpoint state for LangGraph values or active interrupts
+            snapshot = graph_app.get_state(config)
+            state_vals = snapshot.values if (snapshot and snapshot.values) else (res if isinstance(res, dict) else {})
+            
+            # 1. Extract Generated Answer
+            ans = state_vals.get("response")
+            
+            # Check for web_search_fallback or supervisor feedback if present
+            if not ans and state_vals.get("web_search_fallback"):
+                ans = state_vals.get("web_search_fallback")
+            elif not ans and state_vals.get("human_feedback"):
+                ans = state_vals.get("human_feedback")
+
+            # Handle escalation / HITL interrupts where graph paused before human_review_node
+            if (not ans or not str(ans).strip()) and snapshot and snapshot.next:
+                grade = state_vals.get("grade_result")
+                if grade and not grade.is_relevant:
+                    ans = (
+                        "Automated retrieval could not locate authoritative information to answer your inquiry "
+                        "after reformulation. This case has been escalated to a human supervisor for manual review."
+                    )
+                elif state_vals.get("intent") == "escalation_hitl":
+                    ans = "This query involves sensitive legal/billing disputes or requires managerial review. It has been escalated to a human supervisor."
+                else:
+                    ans = "This query requires human oversight and has been escalated to a supervisor."
+
+            if not ans or not str(ans).strip():
+                ans = res.get("response") if isinstance(res, dict) else None
+
+            if not ans or not str(ans).strip():
+                ans = "No response generated."
+
+            # 2. Extract Clean Retrieved Context Chunks (prefer raw chunk content for accurate Ragas scoring)
+            retrieved = []
+            if state_vals.get("retrieved_chunks"):
+                retrieved = [
+                    c.get("content", "").strip()
+                    for c in state_vals.get("retrieved_chunks", [])
+                    if c.get("content", "").strip()
+                ]
+            if not retrieved and state_vals.get("context"):
+                # Fallback to context strings if retrieved_chunks not present
+                retrieved = [
+                    c.strip() for c in state_vals.get("context", [])
+                    if c.strip()
+                ]
             if not retrieved:
                 retrieved = ["No specific context retrieved."]
 
-            answers.append(ans)
+            answers.append(str(ans).strip())
             contexts_list.append(retrieved)
-            # 1-second delay between pipeline invocations to respect Groq free-tier rate limits
+            # Delay between pipeline invocations to respect Groq rate limits
             await asyncio.sleep(1.0)
         except Exception as e:
             print(f"  [Warning] Pipeline failed for query '{q}': {e}")
@@ -108,6 +150,35 @@ def main():
 
     answers = pipeline_outputs["answers"]
     contexts = pipeline_outputs["contexts"]
+
+    # Zero-Token Pre-Flight Verification Gate:
+    # Inspect all 8 generated answers before invoking the Ragas Judge LLM.
+    # If any answer contains retrieval failure indicators or unintended supervisor escalation,
+    # print the failing query and abort immediately with sys.exit(1) to avoid wasting Groq tokens.
+    print("\n[Nexus Evals] Executing Zero-Token Pre-Flight Verification Gate...")
+    failed_evals = []
+    for idx, (q, ans) in enumerate(zip(questions, answers), 1):
+        ans_lower = ans.lower()
+        if (
+            "automated retrieval could not locate" in ans_lower
+            or "escalated to a human supervisor" in ans_lower
+            or "no response generated" in ans_lower
+            or "error during generation" in ans_lower
+        ):
+            failed_evals.append((idx, q, ans))
+
+    if failed_evals:
+        print("\n" + "!" * 75)
+        print(" [PRE-FLIGHT GATE FAILED] Aborting evaluation prior to Ragas LLM judge calls.")
+        print(f" Detected {len(failed_evals)} query failure(s) during LangGraph execution:")
+        for idx, q, ans in failed_evals:
+            print(f"   - Query #{idx}: '{q}'")
+            print(f"     Generated Answer: '{ans}'")
+        print("!" * 75)
+        print("Zero Groq tokens consumed for judging. Please fix retrieval/routing and re-run.")
+        sys.exit(1)
+
+    print(f" [PRE-FLIGHT GATE PASSED] All {len(answers)} queries produced valid grounded answers.")
 
     # Construct HuggingFace Dataset for Ragas
     eval_dataset = Dataset.from_dict({
@@ -206,15 +277,27 @@ def main():
     with open(RESULTS_OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(scorecard, f, indent=2)
 
-    print("\n" + "=" * 65)
-    print("                    RAGAS EVALUATION SCORECARD                  ")
-    print("=" * 65)
+    print("\n" + "=" * 92)
+    print("                    RAGAS EVALUATION SCORECARD SUMMARY TABLE                    ")
+    print("=" * 92)
+    print(f"{'ID':<4} {'Category':<16} {'Faithfulness':<14} {'Answer Relevancy':<18} {'Context Precision':<18} {'Status'}")
+    print("-" * 92)
+    for d in details:
+        q_id = d["id"]
+        cat = d["category"]
+        f_s = d["faithfulness"]
+        r_s = d["answer_relevancy"]
+        p_s = d["context_precision"]
+        status = "PASS" if (f_s >= 0.8 and r_s >= 0.8) else "WARN"
+        print(f"{q_id:<4} {cat:<16} {f_s:<14.4f} {r_s:<18.4f} {p_s:<18.4f} {status}")
+    print("-" * 92)
+    print(f"{'AVG':<4} {'OVERALL':<16} {faith_score:<14.4f} {rel_score:<18.4f} {prec_score:<18.4f} Composite: {mean_score:.4f}")
+    print("=" * 92)
     print(f" Faithfulness:       {faith_score:.4f}  (Measures factual consistency to context)")
     print(f" Answer Relevancy:   {rel_score:.4f}  (Measures alignment with customer query)")
     print(f" Context Precision:  {prec_score:.4f}  (Measures signal-to-noise ratio in chunks)")
-    print("-" * 65)
     print(f" Composite Score:    {mean_score:.4f} / 1.0000")
-    print("=" * 65)
+    print("=" * 92)
     print(f"\n[Nexus Evals] Scorecard successfully saved to: {RESULTS_OUTPUT_PATH}")
 
 
