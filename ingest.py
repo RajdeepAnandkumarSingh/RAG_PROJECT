@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import pandas as pd
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from utils.embeddings import FastEmbedEmbeddings
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
@@ -240,8 +240,8 @@ def ingest_documents_dual_index(
     print(f"[Dual Ingest] Generated {len(chunks)} chunks from {len(raw_docs)} documents.")
 
     # 2. Dense Indexing: ChromaDB
-    print(f"[Dual Ingest] Loading embedding model ({settings.EMBEDDING_MODEL})...")
-    embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+    print(f"[Dual Ingest] Loading FastEmbed ONNX embedding model ({settings.EMBEDDING_MODEL})...")
+    embeddings = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
 
     print(f"[Dual Ingest] Indexing chunks into ChromaDB at {chroma_path} (collection: {collection_name})...")
     try:
@@ -311,7 +311,16 @@ def run_full_ingestion():
     # 2. Documents & PDFs -> ChromaDB + BM25
     ingest_documents_dual_index()
 
-    # 3. Pre-cache FlashRank local cross-encoder model for container pre-baking
+    # 3. Pre-cache FastEmbed ONNX embedding model for container pre-baking
+    try:
+        print(f"[Model Pre-bake] Pre-caching FastEmbed ONNX model ({settings.EMBEDDING_MODEL})...")
+        model = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
+        model.embed_query("warmup query")
+        print(f"[Model Pre-bake] FastEmbed ONNX model ({settings.EMBEDDING_MODEL}) cached successfully.")
+    except Exception as e:
+        print(f"[Model Pre-bake] FastEmbed caching notice: {e}")
+
+    # 4. Pre-cache FlashRank local cross-encoder model for container pre-baking
     try:
         from flashrank import Ranker
         print(f"[Model Pre-bake] Pre-caching FlashRank model ({settings.RERANKER_MODEL})...")
@@ -348,7 +357,7 @@ def append_documents_to_indices(
         chunk_ids.append(cid)
 
     # 1. Upsert into ChromaDB safely with explicit chunk IDs and unified collection
-    embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+    embeddings = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
     vector_db = Chroma(
         collection_name=collection_name,
         persist_directory=chroma_path,

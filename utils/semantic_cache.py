@@ -6,7 +6,7 @@ import asyncio
 from typing import Optional, Dict, Any, List
 import numpy as np
 import redis.asyncio as aioredis
-from langchain_huggingface import HuggingFaceEmbeddings
+from utils.embeddings import FastEmbedEmbeddings
 
 from config import settings
 
@@ -45,13 +45,13 @@ class SemanticCache:
         self.ttl = ttl if ttl is not None else settings.SEMANTIC_CACHE_TTL
         self.threshold = threshold if threshold is not None else settings.SEMANTIC_CACHE_THRESHOLD
         self._redis_client: Optional[aioredis.Redis] = None
-        self._embeddings_model: Optional[HuggingFaceEmbeddings] = None
+        self._embeddings_model: Optional[FastEmbedEmbeddings] = None
         self._key_prefix = "nexus:cache:"
 
-    def _get_embeddings_model(self) -> HuggingFaceEmbeddings:
-        """Lazy access to HuggingFace embeddings model."""
+    def _get_embeddings_model(self) -> FastEmbedEmbeddings:
+        """Lazy access to FastEmbed embeddings model."""
         if self._embeddings_model is None:
-            self._embeddings_model = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+            self._embeddings_model = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
         return self._embeddings_model
 
     async def get_embedding(self, text: str) -> List[float]:

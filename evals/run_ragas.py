@@ -1,4 +1,3 @@
-import torch
 import os
 import sys
 import json
@@ -7,18 +6,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 from datasets import Dataset
 from ragas import evaluate
 from ragas.run_config import RunConfig
 from ragas.metrics import faithfulness, context_precision, AnswerRelevancy
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
 
 # Add parent directory to path to import project config and main app
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import settings
 from main import app as graph_app
+from utils.embeddings import FastEmbedEmbeddings
 
 GOLDEN_DATASET_PATH = Path(__file__).parent / "golden_dataset.json"
 RESULTS_OUTPUT_PATH = Path(__file__).parent / "results.json"
@@ -194,7 +198,7 @@ def main():
         api_key=settings.GROQ_API_KEY,
         temperature=0.0
     )
-    judge_embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+    judge_embeddings = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
 
     configured_metrics = setup_ragas_metrics(judge_llm, judge_embeddings)
 

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from utils.embeddings import FastEmbedEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -43,7 +43,7 @@ _vector_db = None
 def get_vector_db():
     global _vector_db
     if _vector_db is None:
-        embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+        embeddings = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
         _vector_db = Chroma(
             collection_name=settings.CHROMA_COLLECTION_NAME,
             persist_directory=settings.CHROMA_PERSIST_DIRECTORY,

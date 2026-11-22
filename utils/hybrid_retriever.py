@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from utils.embeddings import FastEmbedEmbeddings
 
 from config import settings
 
@@ -68,7 +68,7 @@ class HybridRetriever:
         """Lazy access to ChromaDB."""
         if self.chroma_db is not None:
             return self.chroma_db
-        embeddings = HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
+        embeddings = FastEmbedEmbeddings(model_name=settings.EMBEDDING_MODEL)
         self.chroma_db = Chroma(
             collection_name=self.collection_name,
             persist_directory=self.chroma_path,
