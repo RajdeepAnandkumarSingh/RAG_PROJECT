@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import RetrievalInspector from './components/RetrievalInspector';
 import PipelineArchitectureModal from './components/PipelineArchitectureModal';
+import LivePipelineStrip from './components/LivePipelineStrip';
 import UploadKnowledgeModal from './components/UploadKnowledgeModal';
 import SpotlightTiltCard from './components/SpotlightTiltCard';
 import AnimatedCounter from './components/AnimatedCounter';
@@ -42,7 +43,21 @@ const PRESET_CARD_VARIANTS = {
 };
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
-const API_URL = API_BASE_URL;
+
+function createInitialStages(thread = "") {
+  return {
+    cache: { status: 'idle', hit: false, similarity: 0, matchedQuery: '', latency: null },
+    guardrail: { status: 'idle', classification: '', pii_redacted: false, confidence: null, reasoning: '', latency: null },
+    retrieval: { status: 'idle', count: 0, latency: null, sources: [] },
+    flashrank: { status: 'idle', count: 0, topScores: [], latency: null },
+    crag: { status: 'idle', is_relevant: null, score: 0, retry_count: 0, reasoning: '', latency: null },
+    rewriter: { status: 'idle', retry_count: 0 },
+    generator: { status: 'idle', latency: null, bypassed: false },
+    safeRefusal: { status: 'idle', triggered: false, latency: null },
+    orderTool: { status: 'idle', triggered: false, orderData: null, latency: null },
+    hitl: { isPaused: false, resolved: false, reason: '', threadId: thread, latency: null }
+  };
+}
 
 const SHOWCASE_PRESETS = [
   { 
@@ -176,6 +191,7 @@ function App() {
   const [isResuming, setIsResuming] = useState(false);
   const [showArchitectureModal, setShowArchitectureModal] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [latestQuery, setLatestQuery] = useState("");
 
   // Live Telemetry from /api/telemetry
   const [telemetry, setTelemetry] = useState({
@@ -196,14 +212,8 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
 
-  // Stage tracking for Retrieval Inspector with measured latencies
-  const [activeStages, setActiveStages] = useState({
-    cache: { status: 'idle', hit: false, similarity: 0, matchedQuery: '', latency: null },
-    guardrail: { status: 'idle', classification: '', pii_redacted: false, latency: null },
-    retrieval: { status: 'idle', count: 0, latency: null },
-    crag: { status: 'idle', is_relevant: null, score: 0, retry_count: 0, latency: null },
-    hitl: { isPaused: false, reason: '', threadId: '' }
-  });
+  // Stage tracking for Retrieval Inspector, Live Strip, and Architecture Visualizer
+  const [activeStages, setActiveStages] = useState(() => createInitialStages());
 
   const scrollRef = useRef(null);
   const isDark = theme === 'dark';
@@ -251,19 +261,19 @@ function App() {
     const currentQuery = queryText.trim();
     const userMessage = { role: 'user', content: currentQuery, id: Date.now() };
     setMessages(prev => [...prev, userMessage]);
+    setLatestQuery(currentQuery);
+    setIntent("");
     setQuery("");
     setLoading(true);
 
     const activeThread = threadToUse || threadId;
     const requestStart = performance.now();
+    let streamIntent = "";
 
-    // Reset inspector stages for new query execution
+    // Reset inspector & live strip stages for new query execution
     setActiveStages({
+      ...createInitialStages(activeThread),
       cache: { status: 'running', hit: false, similarity: 0, matchedQuery: '', latency: null },
-      guardrail: { status: 'idle', classification: '', pii_redacted: false, latency: null },
-      retrieval: { status: 'idle', count: 0, latency: null },
-      crag: { status: 'idle', is_relevant: null, score: 0, retry_count: 0, latency: null },
-      hitl: { isPaused: false, reason: '', threadId: activeThread }
     });
     setRetrievedChunks([]);
 
@@ -334,12 +344,16 @@ function App() {
                 similarity: similarity,
                 matchedQuery: matchedQuery,
                 latency: stageLatency
-              }
+              },
+              flashrank: chunks.length > 0
+                ? { status: 'bypassed', count: chunks.length, topScores: chunks.map(c => c.score || 0), latency: 0 }
+                : prev.flashrank
             }));
           } 
           // 2. Guardrail & Routing
           else if (eventName === "guardrail_route" || dataJson.event === "guardrail_route") {
             const classification = dataJson.classification || "safe_rag";
+            streamIntent = classification;
             setIntent(classification);
             setActiveStages(prev => ({
               ...prev,
@@ -352,17 +366,38 @@ function App() {
                 reasoning: dataJson.reasoning,
                 latency: stageLatency
               },
-              retrieval: classification === 'safe_rag' ? { status: 'running', count: 0, latency: null } : prev.retrieval
+              retrieval: classification === 'safe_rag' && !prev.cache.hit
+                ? { ...prev.retrieval, status: 'running', count: 0, latency: null }
+                : prev.retrieval,
+              flashrank: classification === 'safe_rag' && !prev.cache.hit
+                ? { ...prev.flashrank, status: 'running' }
+                : prev.flashrank,
+              safeRefusal: classification === 'prompt_injection'
+                ? { status: 'running', triggered: true, latency: null }
+                : prev.safeRefusal,
+              orderTool: classification === 'live_order_tool'
+                ? { status: 'running', triggered: true, orderData: null, latency: null }
+                : prev.orderTool
             }));
           } 
           // 3. Retrieval Results
           else if (eventName === "retrieval_results" || dataJson.event === "retrieval_results") {
             const chunks = dataJson.chunks || [];
+            const topScores = dataJson.top_scores || chunks.map(c => c.score || 0);
+            const sources = dataJson.sources || chunks.map(c => c.source || 'Knowledge Base');
             setRetrievedChunks(chunks);
             setActiveStages(prev => ({
               ...prev,
-              retrieval: { status: 'completed', count: chunks.length, latency: stageLatency },
-              crag: { status: 'running', is_relevant: null, score: 0, retry_count: 0, latency: null }
+              retrieval: { status: 'completed', count: chunks.length, latency: stageLatency, sources },
+              flashrank: {
+                status: prev.cache.hit ? 'bypassed' : 'completed',
+                count: chunks.length,
+                topScores,
+                latency: prev.cache.hit ? 0 : stageLatency
+              },
+              crag: prev.cache.hit
+                ? prev.crag
+                : { ...prev.crag, status: 'running', is_relevant: null, score: 0, latency: null }
             }));
           } 
           // 4. CRAG Grade
@@ -376,7 +411,16 @@ function App() {
                 retry_count: dataJson.retry_count,
                 reasoning: dataJson.reasoning,
                 latency: stageLatency
-              }
+              },
+              rewriter: !dataJson.is_relevant
+                ? { status: 'completed', retry_count: (dataJson.retry_count || 0) + 1 }
+                : prev.rewriter,
+              retrieval: !dataJson.is_relevant
+                ? { ...prev.retrieval, status: 'running' }
+                : prev.retrieval,
+              generator: dataJson.is_relevant
+                ? { ...prev.generator, status: 'running', bypassed: false }
+                : prev.generator
             }));
           } 
           // 5. HITL Paused
@@ -385,8 +429,10 @@ function App() {
               ...prev,
               hitl: {
                 isPaused: true,
+                resolved: false,
                 reason: dataJson.reason,
-                threadId: dataJson.thread_id || activeThread
+                threadId: dataJson.thread_id || activeThread,
+                latency: stageLatency
               }
             }));
             
@@ -408,6 +454,28 @@ function App() {
           } 
           // 6. Final Response
           else if (eventName === "final_response" || dataJson.event === "final_response") {
+            const finalIntent = dataJson.intent || streamIntent;
+            if (finalIntent) {
+              streamIntent = finalIntent;
+              setIntent(finalIntent);
+            }
+
+            setActiveStages(prev => ({
+              ...prev,
+              safeRefusal: finalIntent === 'prompt_injection'
+                ? { status: 'triggered', triggered: true, latency: stageLatency }
+                : prev.safeRefusal,
+              orderTool: finalIntent === 'live_order_tool'
+                ? { status: 'completed', triggered: true, orderData: dataJson.order_data || null, latency: stageLatency }
+                : prev.orderTool,
+              generator: finalIntent === 'safe_rag'
+                ? { status: 'completed', latency: stageLatency, bypassed: prev.cache.hit }
+                : prev.generator,
+              hitl: finalIntent === 'human_review'
+                ? { ...prev.hitl, isPaused: false, resolved: true, latency: stageLatency }
+                : prev.hitl
+            }));
+
             setMessages(prev => {
               const existing = prev.find(m => m.id === botMsgId);
               if (existing) {
@@ -415,7 +483,7 @@ function App() {
                   ...m,
                   content: dataJson.response,
                   status: dataJson.status || 'success',
-                  intent: dataJson.intent || prev.intent,
+                  intent: dataJson.intent || m.intent,
                   order_data: dataJson.order_data
                 } : m);
               } else {
@@ -424,7 +492,7 @@ function App() {
                   role: 'bot',
                   content: dataJson.response,
                   status: dataJson.status || 'success',
-                  intent: dataJson.intent || intent,
+                  intent: dataJson.intent || streamIntent,
                   order_data: dataJson.order_data,
                   id: botMsgId
                 }];
@@ -539,9 +607,10 @@ function App() {
         }
       ]);
 
+      setIntent('human_review');
       setActiveStages(prev => ({
         ...prev,
-        hitl: { isPaused: false, reason: '', threadId: '' }
+        hitl: { ...prev.hitl, isPaused: false, resolved: true, reason: '', threadId: '' }
       }));
     } catch (err) {
       console.error("Failed to resume thread:", err);
@@ -566,6 +635,12 @@ function App() {
         isOpen={showArchitectureModal}
         onClose={() => setShowArchitectureModal(false)}
         theme={theme}
+        activeStages={activeStages}
+        intent={intent}
+        retrievedChunks={retrievedChunks}
+        telemetry={telemetry}
+        threadId={threadId}
+        latestQuery={latestQuery}
       />
 
       {/* Upload Knowledge Base Modal */}
@@ -700,10 +775,13 @@ function App() {
              {/* New Session Button */}
              <button 
                 onClick={() => {
-                  setThreadId("session_" + Math.random().toString(36).substring(2, 9));
+                  const freshThread = "session_" + Math.random().toString(36).substring(2, 9);
+                  setThreadId(freshThread);
                   setMessages([]);
                   setRetrievedChunks([]);
                   setIntent("");
+                  setLatestQuery("");
+                  setActiveStages(createInitialStages(freshThread));
                 }}
                 title="Reset Thread Session"
                 className={`px-3 py-1.5 rounded-xl transition-all border text-xs font-mono ${
@@ -1140,6 +1218,16 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* Inline Live Pipeline Strip */}
+          <LivePipelineStrip
+            activeStages={activeStages}
+            intent={intent}
+            loading={loading}
+            retrievedChunks={retrievedChunks}
+            theme={theme}
+            onOpenArchitecture={() => setShowArchitectureModal(true)}
+          />
 
           {/* Query Input Box */}
           <form onSubmit={handleSubmit} className="max-w-5xl mx-auto relative group">
