@@ -72,7 +72,7 @@ allowed_origins: List[str] = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
-frontend_url = (os.getenv("FRONTEND_URL") or settings.FRONTEND_URL or "").strip()
+frontend_url = (os.getenv("FRONTEND_URL") or getattr(settings, "FRONTEND_URL", "") or "").strip()
 if frontend_url and frontend_url not in allowed_origins:
     allowed_origins.append(frontend_url)
 

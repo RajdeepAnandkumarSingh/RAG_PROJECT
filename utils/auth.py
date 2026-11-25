@@ -83,11 +83,20 @@ def _utc_now() -> datetime:
 
 
 def _get_db_path(db_path: Optional[str] = None) -> str:
-    return db_path or os.getenv("SQLITE_DB_PATH") or settings.SQLITE_DB_PATH
+    return (
+        db_path
+        or os.getenv("SQLITE_DB_PATH")
+        or getattr(settings, "SQLITE_DB_PATH", "data/nexus_structured.db")
+        or "data/nexus_structured.db"
+    )
 
 
 def get_jwt_secret() -> str:
-    return os.getenv("JWT_SECRET_KEY") or settings.JWT_SECRET_KEY
+    return (
+        os.getenv("JWT_SECRET_KEY")
+        or getattr(settings, "JWT_SECRET_KEY", "")
+        or "nexus-rag-production-jwt-secret-key-2026-change-me"
+    )
 
 
 def hash_password(password: str) -> str:
@@ -550,7 +559,7 @@ class SlidingWindowRateLimiter:
         Returns True if allowed, raises HTTPException(429) if exceeded,
         or returns None if Redis is unconfigured/unreachable.
         """
-        redis_url = os.getenv("REDIS_URL") or settings.REDIS_URL
+        redis_url = os.getenv("REDIS_URL") or getattr(settings, "REDIS_URL", "")
         if not redis_url:
             return None
 

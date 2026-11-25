@@ -27,4 +27,8 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_TTL: int = Field(default=86400)
     SEMANTIC_CACHE_THRESHOLD: float = Field(default=0.92)
 
+    # Authentication & CORS
+    JWT_SECRET_KEY: str = Field(default="nexus-rag-production-jwt-secret-key-2026-change-me")
+    FRONTEND_URL: str = Field(default="https://nexus-rag-control-plane.vercel.app")
+
 settings = Settings()
