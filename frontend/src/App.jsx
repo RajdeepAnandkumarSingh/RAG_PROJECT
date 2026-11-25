@@ -2,12 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Send, Shield, User, Bot, AlertTriangle, 
+  Send, Shield, ShieldCheck, User, Bot, AlertTriangle, 
   CheckCircle, Cpu, 
   Layers, Database, Zap, Activity, 
   ChevronRight, Sparkles, MessageSquare,
   UploadCloud, FileText, Globe, RotateCcw, Lock,
-  Sun, Moon, Terminal
+  Sun, Moon, Terminal, LogIn, LogOut
 } from 'lucide-react';
 import RetrievalInspector from './components/RetrievalInspector';
 import PipelineArchitectureModal from './components/PipelineArchitectureModal';
@@ -15,6 +15,8 @@ import LivePipelineStrip from './components/LivePipelineStrip';
 import UploadKnowledgeModal from './components/UploadKnowledgeModal';
 import SpotlightTiltCard from './components/SpotlightTiltCard';
 import AnimatedCounter from './components/AnimatedCounter';
+import AuthModal from './components/AuthModal';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
 const PRESET_GRID_VARIANTS = {
   hidden: { opacity: 0 },
@@ -174,7 +176,9 @@ const SHOWCASE_PRESETS = [
   },
 ];
 
-function App() {
+function NexusControlPlane() {
+  const { user, authLoading, isSupervisor, authFetch, logout, loginAsDemo } = useAuth();
+
   const [theme, setTheme] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('nexus_rag_theme') || 'dark';
@@ -191,6 +195,10 @@ function App() {
   const [isResuming, setIsResuming] = useState(false);
   const [showArchitectureModal, setShowArchitectureModal] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authModalBanner, setAuthModalBanner] = useState("");
+  const [authModalTab, setAuthModalTab] = useState("signin");
+  const [demoSupervisorBusy, setDemoSupervisorBusy] = useState(false);
   const [latestQuery, setLatestQuery] = useState("");
 
   // Live Telemetry from /api/telemetry
@@ -255,6 +263,24 @@ function App() {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   };
 
+  const openAuthModal = (banner = "", tab = "signin") => {
+    setAuthModalBanner(banner);
+    setAuthModalTab(tab);
+    setShowAuthModal(true);
+  };
+
+  const handleInlineDemoSupervisor = async () => {
+    if (demoSupervisorBusy) return;
+    setDemoSupervisorBusy(true);
+    try {
+      await loginAsDemo('supervisor');
+    } catch (err) {
+      openAuthModal(err?.detail || err?.message || "Supervisor authentication failed.");
+    } finally {
+      setDemoSupervisorBusy(false);
+    }
+  };
+
   const executeChat = async (queryText, threadToUse) => {
     if (!queryText || !queryText.trim() || loading) return;
 
@@ -281,7 +307,7 @@ function App() {
     let botMessageCreated = false;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
+      const response = await authFetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery, thread_id: activeThread })
@@ -544,11 +570,25 @@ function App() {
     formData.append('file', file);
 
     try {
-      const resp = await axios.post(`${API_BASE_URL}/api/ingest/upload`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+      const resp = await authFetch('/api/ingest/upload', {
+        method: 'POST',
+        body: formData,
       });
 
-      const { suggested_prompts, filename, chunks_indexed, tables_created } = resp.data;
+      let respData = null;
+      try {
+        respData = await resp.json();
+      } catch {
+        respData = null;
+      }
+
+      if (!resp.ok) {
+        const err = new Error(respData?.detail || `Upload failed (HTTP ${resp.status})`);
+        err.status = resp.status;
+        throw err;
+      }
+
+      const { suggested_prompts, filename, chunks_indexed, tables_created } = respData;
       const countMsg = tables_created?.length 
         ? `${tables_created.length} table(s)` 
         : `${chunks_indexed} chunk(s)`;
@@ -576,7 +616,7 @@ function App() {
       setTimeout(() => setUploadStatus(null), 6000);
     } catch (err) {
       console.error("Upload error:", err);
-      const detail = err.response?.data?.detail || err.message || "Upload failed.";
+      const detail = err.message || "Upload failed.";
       setUploadStatus({
         type: 'error',
         message: detail
@@ -590,12 +630,30 @@ function App() {
   const handleSupervisorResume = async (threadToResume, overrideMessage) => {
     setIsResuming(true);
     try {
-      const resp = await axios.post(`${API_BASE_URL}/api/chat/resume`, {
-        thread_id: threadToResume || threadId,
-        response: overrideMessage
+      const resp = await authFetch('/api/chat/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          thread_id: threadToResume || threadId,
+          response: overrideMessage
+        }),
       });
 
-      const resumedResponse = resp.data.response;
+      let respData = null;
+      try {
+        respData = await resp.json();
+      } catch {
+        respData = null;
+      }
+
+      if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          openAuthModal('Supervisor clearance required for document ingestion or HITL escalation approvals.');
+        }
+        throw new Error(respData?.detail || `HTTP ${resp.status}`);
+      }
+
+      const resumedResponse = respData.response;
       setMessages(prev => [
         ...prev,
         {
@@ -614,7 +672,7 @@ function App() {
       }));
     } catch (err) {
       console.error("Failed to resume thread:", err);
-      alert("Failed to submit supervisor override: " + (err.response?.data?.detail || err.message));
+      alert("Failed to submit supervisor override: " + (err.message || "Unknown error"));
     } finally {
       setIsResuming(false);
     }
@@ -643,6 +701,18 @@ function App() {
         latestQuery={latestQuery}
       />
 
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => {
+          setShowAuthModal(false);
+          setAuthModalBanner("");
+        }}
+        theme={theme}
+        initialTab={authModalTab}
+        contextBanner={authModalBanner}
+      />
+
       {/* Upload Knowledge Base Modal */}
       <UploadKnowledgeModal
         isOpen={showUploadModal}
@@ -651,6 +721,10 @@ function App() {
         uploading={uploading}
         uploadStatus={uploadStatus}
         onSelectFile={processFileUpload}
+        onOpenAuthModal={() => {
+          setShowUploadModal(false);
+          openAuthModal('Supervisor clearance required for document ingestion or HITL escalation approvals.');
+        }}
       />
 
       {/* Upgraded Retrieval Inspector Sidebar */}
@@ -662,6 +736,9 @@ function App() {
         isResuming={isResuming}
         theme={theme}
         telemetry={telemetry}
+        onOpenAuthModal={() =>
+          openAuthModal('Supervisor clearance required for document ingestion or HITL escalation approvals.')
+        }
       />
 
       {/* Main AI Observability & Control Plane Area */}
@@ -805,6 +882,64 @@ function App() {
               >
                 {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
+
+             {/* Top Header Account Pill */}
+             {user ? (
+               <div
+                 className={`flex items-center gap-2 pl-2.5 pr-1.5 py-1 rounded-xl border transition-all ${
+                   isDark
+                     ? 'bg-[#0B1120]/85 border-[#1E293B] text-slate-100'
+                     : 'bg-white/95 border-emerald-200 text-slate-800 shadow-xs'
+                 }`}
+               >
+                 <span className="text-xs font-semibold max-w-[130px] truncate">
+                   {user.full_name || user.name || user.email}
+                 </span>
+                 <span
+                   className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider border ${
+                     user.role === 'supervisor'
+                       ? isDark
+                         ? 'bg-gradient-to-r from-amber-500/20 to-violet-500/20 text-amber-300 border-amber-500/40'
+                         : 'bg-amber-50 text-amber-800 border-amber-300'
+                       : isDark
+                       ? 'bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 text-accent-cyan border-accent-cyan/35'
+                       : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                   }`}
+                 >
+                   {user.role === 'supervisor' ? 'SUPERVISOR' : 'ANALYST'}
+                 </span>
+                 <button
+                   type="button"
+                   onClick={logout}
+                   title="Sign Out"
+                   className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors ${
+                     isDark
+                       ? 'hover:bg-white/10 text-slate-400 hover:text-white'
+                       : 'hover:bg-emerald-50 text-slate-600 hover:text-slate-900'
+                   }`}
+                 >
+                   <LogOut className="w-3.5 h-3.5" />
+                   <span className="hidden xl:inline">Sign Out</span>
+                 </button>
+               </div>
+             ) : (
+               <button
+                 type="button"
+                 onClick={() => openAuthModal()}
+                 disabled={authLoading}
+                 title="Sign In or launch a 1-Click Demo session"
+                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all disabled:opacity-60 ${
+                   isDark
+                     ? 'bg-white/5 hover:bg-white/10 active:scale-95 border-white/15 text-slate-200 hover:text-white'
+                     : 'bg-white/95 hover:bg-emerald-50 active:scale-95 border-emerald-200 text-slate-700 hover:text-slate-900 shadow-xs'
+                 }`}
+               >
+                 <LogIn className="w-3.5 h-3.5 text-accent-cyan" />
+                 <span className="whitespace-nowrap">
+                   {authLoading ? 'Checking Session...' : 'Guest Mode · Sign In'}
+                 </span>
+               </button>
+             )}
           </div>
         </header>
 
@@ -1119,14 +1254,35 @@ function App() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className={`flex items-center gap-2.5 p-3.5 rounded-xl text-xs font-bold border backdrop-blur-md ${
+                        className={`flex flex-col gap-2.5 p-3.5 rounded-xl text-xs font-bold border backdrop-blur-md ${
                           isDark 
                             ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' 
                             : 'bg-amber-50 border-amber-300 text-amber-800'
                         }`}
                       >
-                        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                        <span>HITL PAUSED: Awaiting Supervisor Override in Retrieval Inspector sidebar</span>
+                        <div className="flex items-center gap-2.5">
+                          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                          <span>HITL PAUSED: Awaiting Supervisor Override in Retrieval Inspector sidebar</span>
+                        </div>
+                        {activeStages?.hitl?.isPaused && !isSupervisor && (
+                          <div className={`flex flex-wrap items-center justify-between gap-2 pt-2 border-t text-[11px] font-medium ${
+                            isDark ? 'border-amber-500/20 text-slate-300' : 'border-amber-200 text-amber-900'
+                          }`}>
+                            <span className="flex items-center gap-1.5">
+                              <Lock className="w-3.5 h-3.5 text-amber-400" />
+                              Supervisor Clearance Required to resume this thread.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleInlineDemoSupervisor}
+                              disabled={demoSupervisorBusy}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:brightness-110 text-slate-950 font-bold text-[11px] transition-all disabled:opacity-50"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              <span>{demoSupervisorBusy ? 'Signing In...' : 'Sign In as Demo Supervisor'}</span>
+                            </button>
+                          </div>
+                        )}
                       </motion.div>
                     )}
                   </div>
@@ -1280,4 +1436,10 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AuthProvider>
+      <NexusControlPlane />
+    </AuthProvider>
+  );
+}

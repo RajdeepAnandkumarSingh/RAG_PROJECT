@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity,
   Shield,
+  ShieldCheck,
   Database,
   Cpu,
   CheckCircle,
@@ -17,8 +18,11 @@ import {
   ChevronUp,
   Server,
   Clock,
+  Lock,
+  LogIn,
 } from 'lucide-react';
 import AnimatedCounter from './AnimatedCounter';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * Wraps each LangGraph pipeline node with an animated rotating conic-gradient
@@ -72,15 +76,44 @@ export default function RetrievalInspector({
   isResuming = false,
   theme = 'dark',
   telemetry = null,
+  onOpenAuthModal,
 }) {
+  const { user, isSupervisor, loginAsDemo } = useAuth();
   const [overrideText, setOverrideText] = useState('');
   const [expandedChunkIdx, setExpandedChunkIdx] = useState(0);
+  const [demoSigningIn, setDemoSigningIn] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const isDark = theme === 'dark';
   const isPaused = activeStages?.hitl?.isPaused;
 
+  useEffect(() => {
+    if (cooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setCooldownSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldownSeconds]);
+
+  const handleDemoSupervisorLogin = async () => {
+    if (demoSigningIn || cooldownSeconds > 0) return;
+    setDemoSigningIn(true);
+    setAuthError('');
+    try {
+      await loginAsDemo('supervisor');
+    } catch (err) {
+      if (err?.status === 429) {
+        setCooldownSeconds(Number(err.retryAfter) > 0 ? Number(err.retryAfter) : 60);
+      }
+      setAuthError(err?.detail || err?.message || 'Unable to sign in as Demo Supervisor.');
+    } finally {
+      setDemoSigningIn(false);
+    }
+  };
+
   const handleResumeSubmit = (e) => {
     e.preventDefault();
-    if (!overrideText.trim() || isResuming) return;
+    if (!isSupervisor || !overrideText.trim() || isResuming) return;
     if (onSupervisorResume) {
       onSupervisorResume(activeStages?.hitl?.threadId, overrideText);
       setOverrideText('');
@@ -584,36 +617,97 @@ export default function RetrievalInspector({
                   'Pipeline interrupted before human_review_node. Supervisor input required to resume.'}
               </p>
 
-              <form onSubmit={handleResumeSubmit} className="space-y-2">
-                <textarea
-                  rows={3}
-                  value={overrideText}
-                  onChange={(e) => setOverrideText(e.target.value)}
-                  placeholder="Enter supervisor override or instructions..."
-                  className={`w-full border rounded-xl p-2.5 text-xs focus:outline-none focus:ring-1 resize-none font-medium ${
+              {isSupervisor ? (
+                <form onSubmit={handleResumeSubmit} className="space-y-2">
+                  <textarea
+                    rows={3}
+                    value={overrideText}
+                    onChange={(e) => setOverrideText(e.target.value)}
+                    placeholder="Enter supervisor override or instructions..."
+                    className={`w-full border rounded-xl p-2.5 text-xs focus:outline-none focus:ring-1 resize-none font-medium ${
+                      isDark
+                        ? 'bg-[#090D16] border-amber-500/30 text-slate-100 placeholder:text-slate-500 focus:border-amber-500 focus:ring-amber-500/30'
+                        : 'bg-white border-amber-300 text-slate-900 placeholder:text-slate-400 focus:border-amber-500 focus:ring-amber-400'
+                    }`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={isResuming || !overrideText.trim()}
+                    className="w-full py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:brightness-110 active:scale-[0.99] text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:pointer-events-none shadow-sm"
+                  >
+                    {isResuming ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Resuming Thread...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Dispatch Override</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                <div
+                  className={`p-3 rounded-xl border space-y-2.5 ${
                     isDark
-                      ? 'bg-[#090D16] border-amber-500/30 text-slate-100 placeholder:text-slate-500 focus:border-amber-500 focus:ring-amber-500/30'
-                      : 'bg-white border-amber-300 text-slate-900 placeholder:text-slate-400 focus:border-amber-500 focus:ring-amber-400'
+                      ? 'bg-[#090D16]/85 border-amber-500/25'
+                      : 'bg-white/90 border-amber-300'
                   }`}
-                />
-                <button
-                  type="submit"
-                  disabled={isResuming || !overrideText.trim()}
-                  className="w-full py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:brightness-110 active:scale-[0.99] text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:pointer-events-none shadow-sm"
                 >
-                  {isResuming ? (
-                    <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Resuming Thread...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Dispatch Override</span>
-                    </>
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                    <Lock className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>Supervisor Clearance Required</span>
+                  </div>
+                  <p className={`text-[11px] leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                    {user
+                      ? `Signed in as ${user.full_name || user.email} (ANALYST). Only Supervisor accounts can dispatch HITL overrides.`
+                      : 'Guest Mode active. Sign in as a Supervisor to approve and resume escalated conversations.'}
+                  </p>
+
+                  {cooldownSeconds > 0 && (
+                    <div className="text-[10px] font-mono font-semibold text-red-400">
+                      Security cooldown active — retry in {cooldownSeconds}s
+                    </div>
                   )}
-                </button>
-              </form>
+
+                  {authError && cooldownSeconds === 0 && (
+                    <div className="text-[10px] font-medium text-red-400">{authError}</div>
+                  )}
+
+                  <div className="space-y-1.5">
+                    <button
+                      type="button"
+                      onClick={handleDemoSupervisorLogin}
+                      disabled={demoSigningIn || cooldownSeconds > 0}
+                      className="w-full py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:brightness-110 active:scale-[0.99] text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-all disabled:opacity-45 disabled:pointer-events-none shadow-sm"
+                    >
+                      {demoSigningIn ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                      )}
+                      <span>Sign In as Demo Supervisor</span>
+                    </button>
+
+                    {onOpenAuthModal && (
+                      <button
+                        type="button"
+                        onClick={onOpenAuthModal}
+                        className={`w-full py-1.5 rounded-xl border text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                          isDark
+                            ? 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300'
+                            : 'bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-900'
+                        }`}
+                      >
+                        <LogIn className="w-3 h-3" />
+                        <span>Sign In with Credentials</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
