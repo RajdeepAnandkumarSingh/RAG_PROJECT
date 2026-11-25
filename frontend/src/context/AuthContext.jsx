@@ -8,7 +8,9 @@ import React, {
   useState,
 } from 'react';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000')
+  .trim()
+  .replace(/\/+$/, '');
 
 const ACCESS_TOKEN_KEY = 'nexus_rag_access_token';
 const REFRESH_TOKEN_KEY = 'nexus_rag_refresh_token';
@@ -273,8 +275,9 @@ export function AuthProvider({ children }) {
   );
 
   const submitAuthRequest = useCallback(
-    async (endpoint, payload, fallbackError) => {
-      const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+    async (endpointOrUrl, payload, fallbackError) => {
+      const targetUrl = resolveApiUrl(endpointOrUrl);
+      const res = await fetch(targetUrl, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -308,7 +311,7 @@ export function AuthProvider({ children }) {
   const login = useCallback(
     async (email, password) => {
       return submitAuthRequest(
-        '/api/auth/login',
+        `${API_BASE_URL}/api/auth/login`,
         { email: email.trim(), password },
         'Invalid email or password.'
       );
@@ -319,7 +322,7 @@ export function AuthProvider({ children }) {
   const signup = useCallback(
     async (fullName, email, password) => {
       return submitAuthRequest(
-        '/api/auth/signup',
+        `${API_BASE_URL}/api/auth/signup`,
         { full_name: fullName.trim(), email: email.trim(), password },
         'Unable to create account. Please verify your details.'
       );

@@ -44,7 +44,9 @@ const PRESET_CARD_VARIANTS = {
   },
 };
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000")
+  .trim()
+  .replace(/\/+$/, "");
 
 function createInitialStages(thread = "") {
   return {
@@ -307,7 +309,7 @@ function NexusControlPlane() {
     let botMessageCreated = false;
 
     try {
-      const response = await authFetch('/api/chat/stream', {
+      const response = await authFetch(`${API_BASE_URL}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery, thread_id: activeThread })
@@ -570,7 +572,7 @@ function NexusControlPlane() {
     formData.append('file', file);
 
     try {
-      const resp = await authFetch('/api/ingest/upload', {
+      const resp = await authFetch(`${API_BASE_URL}/api/ingest/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -630,7 +632,7 @@ function NexusControlPlane() {
   const handleSupervisorResume = async (threadToResume, overrideMessage) => {
     setIsResuming(true);
     try {
-      const resp = await authFetch('/api/chat/resume', {
+      const resp = await authFetch(`${API_BASE_URL}/api/chat/resume`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
