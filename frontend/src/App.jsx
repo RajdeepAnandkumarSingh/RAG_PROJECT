@@ -3,14 +3,43 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Send, Shield, User, Bot, AlertTriangle, 
-  Search, Info, CheckCircle, Cpu, 
+  CheckCircle, Cpu, 
   Layers, Database, Zap, Activity, 
-  ChevronRight, Sparkles, MessageSquare, UserCheck,
+  ChevronRight, Sparkles, MessageSquare,
   UploadCloud, FileText, Globe, RotateCcw, Lock,
-  Sun, Moon, GitBranch, Terminal, ExternalLink
+  Sun, Moon, Terminal
 } from 'lucide-react';
 import RetrievalInspector from './components/RetrievalInspector';
 import PipelineArchitectureModal from './components/PipelineArchitectureModal';
+import UploadKnowledgeModal from './components/UploadKnowledgeModal';
+import SpotlightTiltCard from './components/SpotlightTiltCard';
+import AnimatedCounter from './components/AnimatedCounter';
+
+const PRESET_GRID_VARIANTS = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.055,
+      delayChildren: 0.08,
+    },
+  },
+};
+
+const PRESET_CARD_VARIANTS = {
+  hidden: { opacity: 0, y: 18, scale: 0.96 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: {
+      type: 'spring',
+      stiffness: 320,
+      damping: 24,
+      mass: 0.75,
+    },
+  },
+};
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
 const API_URL = API_BASE_URL;
@@ -146,6 +175,7 @@ function App() {
   const [threadId, setThreadId] = useState(() => "session_" + Math.random().toString(36).substring(2, 9));
   const [isResuming, setIsResuming] = useState(false);
   const [showArchitectureModal, setShowArchitectureModal] = useState(false);
+  const [showUploadModal, setShowUploadModal] = useState(false);
 
   // Live Telemetry from /api/telemetry
   const [telemetry, setTelemetry] = useState({
@@ -165,7 +195,6 @@ function App() {
   const [customPrompts, setCustomPrompts] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
-  const fileInputRef = useRef(null);
 
   // Stage tracking for Retrieval Inspector with measured latencies
   const [activeStages, setActiveStages] = useState({
@@ -437,8 +466,7 @@ function App() {
     executeChat(presetQuery, newThread);
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
+  const processFileUpload = async (file) => {
     if (!file) return;
 
     setUploading(true);
@@ -488,9 +516,6 @@ function App() {
       setTimeout(() => setUploadStatus(null), 7000);
     } finally {
       setUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
     }
   };
 
@@ -527,17 +552,30 @@ function App() {
   };
 
   return (
-    <div className={`relative flex h-screen overflow-hidden selection:bg-primary/30 transition-colors ${
-      isDark ? 'bg-[#090D16] text-slate-100' : 'bg-[#F8FAFC] text-slate-900'
+    <div className={`relative flex h-screen overflow-hidden selection:bg-accent-emerald/30 transition-colors ${
+      isDark ? 'bg-[#070A14] text-slate-100' : 'bg-[#F7FAF8] text-slate-900'
     }`}>
-      {/* Background Mesh Effect */}
-      <div className="bg-mesh" />
+      {/* Non-blocking Drifting Radial Aurora Mesh Backdrop */}
+      <div className="bg-mesh" aria-hidden="true">
+        <div className="aurora-layer aurora-layer-primary" />
+        <div className="aurora-layer aurora-layer-secondary" />
+      </div>
       
       {/* Interactive Pipeline Architecture Modal */}
       <PipelineArchitectureModal
         isOpen={showArchitectureModal}
         onClose={() => setShowArchitectureModal(false)}
         theme={theme}
+      />
+
+      {/* Upload Knowledge Base Modal */}
+      <UploadKnowledgeModal
+        isOpen={showUploadModal}
+        onClose={() => setShowUploadModal(false)}
+        theme={theme}
+        uploading={uploading}
+        uploadStatus={uploadStatus}
+        onSelectFile={processFileUpload}
       />
 
       {/* Upgraded Retrieval Inspector Sidebar */}
@@ -554,48 +592,52 @@ function App() {
       {/* Main AI Observability & Control Plane Area */}
       <main className="flex-1 flex flex-col relative z-10 overflow-hidden">
         {/* Top Header Bar */}
-        <header className={`h-20 border-b px-8 flex items-center justify-between transition-colors ${
+        <header className={`h-20 border-b px-8 flex items-center justify-between backdrop-blur-md transition-colors ${
           isDark 
-            ? 'bg-[#111827]/80 backdrop-blur-xl border-[#1E293B]' 
-            : 'bg-white/85 backdrop-blur-xl border-[#E2E8F0] shadow-xs'
+            ? 'bg-[#0F1629]/75 border-[#1E293B]' 
+            : 'bg-white/80 border-emerald-200/75 shadow-xs'
         }`}>
           {/* Logo & System Identity */}
           <div className="flex items-center gap-4">
             <div className="relative">
-              <div className="w-11 h-11 bg-gradient-to-tr from-primary to-accent-purple rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
+              <div className="w-11 h-11 bg-gradient-to-tr from-accent-emerald to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
                 <Shield className="text-white w-5 h-5" />
               </div>
-              <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-accent-emerald rounded-full border-2 border-white dark:border-[#090D16]" />
+              <div className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-accent-emerald rounded-full border-2 ${
+                isDark ? 'border-[#070A14]' : 'border-white'
+              }`} />
             </div>
 
             <div>
               <div className="flex items-center gap-2">
                 <h1 className={`text-base font-extrabold tracking-tight ${
                   isDark 
-                    ? 'bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent' 
+                    ? 'bg-gradient-to-r from-white via-emerald-100 to-slate-400 bg-clip-text text-transparent' 
                     : 'text-slate-900'
                 }`}>
                   NEXUS RAG
                 </h1>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider ${
-                  isDark ? 'bg-white/10 text-slate-300' : 'bg-slate-100 text-slate-700 border border-slate-200'
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${
+                  isDark 
+                    ? 'bg-accent-emerald/15 text-emerald-300 border-accent-emerald/30' 
+                    : 'bg-emerald-50 text-emerald-800 border-emerald-200'
                 }`}>
                   CONTROL PLANE v2.0
                 </span>
               </div>
               
               <div className="flex items-center gap-3 text-xs mt-0.5">
-                <span className={`flex items-center gap-1 font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                <span className={`flex items-center gap-1 font-medium ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
                   <Cpu className="w-3 h-3 text-primary-light" />
                   Groq + LangGraph Engine
                 </span>
-                <span className={`w-1 h-1 rounded-full ${isDark ? 'bg-slate-700' : 'bg-slate-300'}`} />
-                <span className={`flex items-center gap-1 font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                  <Zap className="w-3 h-3 text-accent-cyan" />
+                <span className={`w-1 h-1 rounded-full ${isDark ? 'bg-slate-700' : 'bg-emerald-300'}`} />
+                <span className={`flex items-center gap-1 font-medium ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  <Zap className="w-3 h-3 text-accent-emerald" />
                   SSE Live Pipeline
                 </span>
-                <span className={`w-1 h-1 rounded-full ${isDark ? 'bg-slate-700' : 'bg-slate-300'}`} />
-                <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                <span className={`w-1 h-1 rounded-full ${isDark ? 'bg-slate-700' : 'bg-emerald-300'}`} />
+                <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
                   {threadId}
                 </span>
               </div>
@@ -604,30 +646,28 @@ function App() {
           
           {/* Action Toolbar */}
           <div className="flex items-center gap-2.5">
-             {/* Hidden file input for Knowledge Base Upload */}
-             <input 
-               type="file" 
-               ref={fileInputRef} 
-               onChange={handleFileUpload} 
-               accept=".pdf,.xlsx,.xls,.csv,.md,.txt" 
-               className="hidden" 
-             />
-
              {/* Upload Status Badge */}
-             {uploadStatus && (
-               <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all ${
-                 uploadStatus.type === 'success'
-                   ? isDark ? 'bg-accent-emerald/10 border-accent-emerald/30 text-accent-emerald' : 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                   : uploadStatus.type === 'error'
-                   ? isDark ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-red-50 border-red-300 text-red-700'
-                   : isDark ? 'bg-primary/10 border-primary/30 text-primary-light animate-pulse' : 'bg-blue-50 border-blue-300 text-blue-700 animate-pulse'
-               }`}>
-                 {uploadStatus.type === 'uploading' && <Activity className="w-3.5 h-3.5 animate-spin" />}
-                 {uploadStatus.type === 'success' && <CheckCircle className="w-3.5 h-3.5" />}
-                 {uploadStatus.type === 'error' && <AlertTriangle className="w-3.5 h-3.5" />}
-                 <span className="max-w-[180px] truncate">{uploadStatus.message}</span>
-               </div>
-             )}
+             <AnimatePresence>
+               {uploadStatus && (
+                 <motion.div
+                   initial={{ opacity: 0, scale: 0.92, x: 8 }}
+                   animate={{ opacity: 1, scale: 1, x: 0 }}
+                   exit={{ opacity: 0, scale: 0.92, x: 8 }}
+                   className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all ${
+                     uploadStatus.type === 'success'
+                       ? isDark ? 'bg-accent-emerald/10 border-accent-emerald/30 text-accent-emerald' : 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                       : uploadStatus.type === 'error'
+                       ? isDark ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-red-50 border-red-300 text-red-700'
+                       : isDark ? 'bg-primary/10 border-primary/30 text-primary-light animate-pulse' : 'bg-emerald-50 border-emerald-300 text-emerald-700 animate-pulse'
+                   }`}
+                 >
+                   {uploadStatus.type === 'uploading' && <Activity className="w-3.5 h-3.5 animate-spin" />}
+                   {uploadStatus.type === 'success' && <CheckCircle className="w-3.5 h-3.5" />}
+                   {uploadStatus.type === 'error' && <AlertTriangle className="w-3.5 h-3.5" />}
+                   <span className="max-w-[180px] truncate">{uploadStatus.message}</span>
+                 </motion.div>
+               )}
+             </AnimatePresence>
 
              {/* Interactive Architecture Modal Button */}
              <button
@@ -635,26 +675,25 @@ function App() {
                 title="Inspect LangGraph State Machine Architecture"
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all border text-xs font-semibold ${
                   isDark
-                    ? 'bg-white/5 hover:bg-white/10 active:scale-95 border-white/10 text-slate-300 hover:text-white'
-                    : 'bg-white hover:bg-slate-100 active:scale-95 border-slate-200 text-slate-700 hover:text-slate-900 shadow-xs'
+                    ? 'bg-white/5 hover:bg-white/10 active:scale-95 border-white/10 text-slate-200 hover:text-white'
+                    : 'bg-white/90 hover:bg-emerald-50 active:scale-95 border-emerald-200 text-slate-700 hover:text-slate-900 shadow-xs'
                 }`}
-             >
+              >
                 <Layers className="w-3.5 h-3.5 text-accent-cyan" />
                 <span>Architecture</span>
              </button>
 
-             {/* Upload Knowledge Base Button */}
+             {/* Upload Knowledge Base Modal Button */}
              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
+                onClick={() => setShowUploadModal(true)}
                 title="Upload Knowledge Base (.pdf, .xlsx, .xls, .csv, .md, .txt)"
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all border text-xs font-semibold disabled:opacity-50 ${
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all border text-xs font-semibold ${
                   isDark
-                    ? 'bg-white/5 hover:bg-white/10 active:scale-95 border-white/10 text-slate-300 hover:text-white'
-                    : 'bg-white hover:bg-slate-100 active:scale-95 border-slate-200 text-slate-700 hover:text-slate-900 shadow-xs'
+                    ? 'bg-white/5 hover:bg-white/10 active:scale-95 border-white/10 text-slate-200 hover:text-white'
+                    : 'bg-white/90 hover:bg-emerald-50 active:scale-95 border-emerald-200 text-slate-700 hover:text-slate-900 shadow-xs'
                 }`}
-             >
-                <UploadCloud className={`w-3.5 h-3.5 text-primary-light ${uploading ? 'animate-bounce' : ''}`} />
+              >
+                <UploadCloud className={`w-3.5 h-3.5 text-accent-emerald ${uploading ? 'animate-bounce' : ''}`} />
                 <span>Upload Docs</span>
              </button>
 
@@ -670,9 +709,9 @@ function App() {
                 className={`px-3 py-1.5 rounded-xl transition-all border text-xs font-mono ${
                   isDark
                     ? 'border-white/10 hover:bg-white/5 text-slate-400 hover:text-slate-200'
-                    : 'border-slate-200 hover:bg-slate-100 text-slate-600 hover:text-slate-900 bg-white shadow-xs'
+                    : 'border-emerald-200 hover:bg-emerald-50 text-slate-700 hover:text-slate-900 bg-white/90 shadow-xs'
                 }`}
-             >
+              >
                 New Session
              </button>
 
@@ -683,11 +722,11 @@ function App() {
                 className={`p-2 rounded-xl border transition-all ${
                   isDark 
                     ? 'border-white/10 bg-white/5 hover:bg-white/10 text-amber-400' 
-                    : 'border-slate-200 bg-white hover:bg-slate-100 text-slate-700 shadow-xs'
+                    : 'border-emerald-200 bg-white/90 hover:bg-emerald-50 text-slate-700 shadow-xs'
                 }`}
-             >
+              >
                 {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-             </button>
+              </button>
           </div>
         </header>
 
@@ -711,7 +750,7 @@ function App() {
                     <span className="w-1.5 h-1.5 rounded-full bg-accent-emerald animate-pulse" />
                     Production Observability & Control Plane
                   </span>
-                  <span className={`text-xs font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                  <span className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                     Active Model: {telemetry.groq_model}
                   </span>
                 </div>
@@ -722,23 +761,28 @@ function App() {
                   Nexus Enterprise AI Observability Engine
                 </h2>
                 <p className={`text-xs md:text-sm max-w-3xl leading-relaxed ${
-                  isDark ? 'text-slate-400' : 'text-slate-600'
+                  isDark ? 'text-slate-300' : 'text-slate-600'
                 }`}>
                   Deterministic hybrid retrieval (ChromaDB + BM25Okapi RRF), cross-encoder reranking, CRAG self-correction, and human-in-the-loop governance for enterprise customer support.
                 </p>
               </div>
 
-              {/* CRISP SYSTEM TELEMETRY & BENCHMARK RIBBON */}
+              {/* CRISP SYSTEM TELEMETRY & BENCHMARK RIBBON (3D Spotlight Tilt Cards) */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* 1. RAGAS Benchmark Card */}
-                <div className={`p-4 rounded-2xl border transition-all ${
-                  isDark 
-                    ? 'bg-[#111827] border-[#1E293B]' 
-                    : 'bg-white border-slate-200 shadow-xs'
-                }`}>
+                <SpotlightTiltCard
+                  theme={theme}
+                  spotlightColor={isDark ? 'rgba(16, 185, 129, 0.16)' : 'rgba(16, 185, 129, 0.12)'}
+                  borderGlowColor={isDark ? 'rgba(16, 185, 129, 0.7)' : 'rgba(5, 150, 105, 0.55)'}
+                  className={`p-4 rounded-2xl border backdrop-blur-md transition-colors ${
+                    isDark 
+                      ? 'bg-[#0F1629]/75 border-[#1E293B]' 
+                      : 'bg-gradient-to-br from-white/90 to-emerald-50/50 border-emerald-200/80 shadow-xs'
+                  }`}
+                >
                   <div className="flex items-center justify-between mb-2">
                     <span className={`text-[10px] font-mono uppercase font-bold tracking-wider ${
-                      isDark ? 'text-slate-400' : 'text-slate-500'
+                      isDark ? 'text-slate-400' : 'text-slate-600'
                     }`}>
                       RAGAS Composite Benchmark
                     </span>
@@ -752,39 +796,46 @@ function App() {
                   </div>
 
                   <div className="flex items-baseline gap-2">
-                    <span className={`text-2xl font-black font-mono ${
-                      isDark ? 'text-white' : 'text-slate-950'
-                    }`}>
-                      {(telemetry.composite_score || 0.9404).toFixed(3)}
-                    </span>
+                    <AnimatedCounter
+                      value={telemetry.composite_score || 0.9404}
+                      decimals={3}
+                      className={`text-2xl font-black font-mono ${
+                        isDark ? 'text-white' : 'text-slate-950'
+                      }`}
+                    />
                     <span className="text-xs text-accent-emerald font-semibold">/ 1.000</span>
                   </div>
 
                   <div className={`mt-2 pt-2 border-t flex items-center justify-between text-[10px] font-mono ${
-                    isDark ? 'border-slate-800 text-slate-400' : 'border-slate-100 text-slate-500'
+                    isDark ? 'border-slate-800/80 text-slate-400' : 'border-emerald-100 text-slate-600'
                   }`}>
-                    <span>Faithfulness: <strong className={isDark ? "text-slate-200" : "text-slate-800"}>{(telemetry.faithfulness || 0.9583).toFixed(2)}</strong></span>
+                    <span>Faithfulness: <strong className={isDark ? "text-slate-200" : "text-slate-900"}>{(telemetry.faithfulness || 0.9583).toFixed(2)}</strong></span>
                     <span>·</span>
-                    <span>Context Precision: <strong className={isDark ? "text-slate-200" : "text-slate-800"}>{(telemetry.context_precision || 0.9896).toFixed(2)}</strong></span>
+                    <span>Context Precision: <strong className={isDark ? "text-slate-200" : "text-slate-900"}>{(telemetry.context_precision || 0.9896).toFixed(2)}</strong></span>
                   </div>
-                </div>
+                </SpotlightTiltCard>
 
                 {/* 2. Hybrid Index Status Card */}
-                <div className={`p-4 rounded-2xl border transition-all ${
-                  isDark 
-                    ? 'bg-[#111827] border-[#1E293B]' 
-                    : 'bg-white border-slate-200 shadow-xs'
-                }`}>
+                <SpotlightTiltCard
+                  theme={theme}
+                  spotlightColor={isDark ? 'rgba(6, 182, 212, 0.16)' : 'rgba(16, 185, 129, 0.12)'}
+                  borderGlowColor={isDark ? 'rgba(6, 182, 212, 0.7)' : 'rgba(5, 150, 105, 0.55)'}
+                  className={`p-4 rounded-2xl border backdrop-blur-md transition-colors ${
+                    isDark 
+                      ? 'bg-[#0F1629]/75 border-[#1E293B]' 
+                      : 'bg-gradient-to-br from-white/90 to-emerald-50/50 border-emerald-200/80 shadow-xs'
+                  }`}
+                >
                   <div className="flex items-center justify-between mb-2">
                     <span className={`text-[10px] font-mono uppercase font-bold tracking-wider ${
-                      isDark ? 'text-slate-400' : 'text-slate-500'
+                      isDark ? 'text-slate-400' : 'text-slate-600'
                     }`}>
                       Hybrid Index Architecture
                     </span>
                     <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border ${
                       isDark 
                         ? 'bg-accent-cyan/15 text-accent-cyan border-accent-cyan/30' 
-                        : 'bg-cyan-50 text-cyan-700 border-cyan-200'
+                        : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     }`}>
                       {telemetry.bm25_status || 'Active'}
                     </span>
@@ -799,52 +850,59 @@ function App() {
                   </div>
 
                   <div className={`mt-2 pt-2 border-t flex items-center justify-between text-[10px] font-mono ${
-                    isDark ? 'border-slate-800 text-slate-400' : 'border-slate-100 text-slate-500'
+                    isDark ? 'border-slate-800/80 text-slate-400' : 'border-emerald-100 text-slate-600'
                   }`}>
                     <span>{telemetry.chroma_chunk_count || 86} Dense Chunks</span>
                     <span>·</span>
                     <span>RRF (k=60) Fusion</span>
                   </div>
-                </div>
+                </SpotlightTiltCard>
 
                 {/* 3. Structured Database Card */}
-                <div className={`p-4 rounded-2xl border transition-all ${
-                  isDark 
-                    ? 'bg-[#111827] border-[#1E293B]' 
-                    : 'bg-white border-slate-200 shadow-xs'
-                }`}>
+                <SpotlightTiltCard
+                  theme={theme}
+                  spotlightColor={isDark ? 'rgba(99, 102, 241, 0.18)' : 'rgba(16, 185, 129, 0.12)'}
+                  borderGlowColor={isDark ? 'rgba(99, 102, 241, 0.7)' : 'rgba(5, 150, 105, 0.55)'}
+                  className={`p-4 rounded-2xl border backdrop-blur-md transition-colors ${
+                    isDark 
+                      ? 'bg-[#0F1629]/75 border-[#1E293B]' 
+                      : 'bg-gradient-to-br from-white/90 to-emerald-50/50 border-emerald-200/80 shadow-xs'
+                  }`}
+                >
                   <div className="flex items-center justify-between mb-2">
                     <span className={`text-[10px] font-mono uppercase font-bold tracking-wider ${
-                      isDark ? 'text-slate-400' : 'text-slate-500'
+                      isDark ? 'text-slate-400' : 'text-slate-600'
                     }`}>
                       Structured Knowledge DB
                     </span>
                     <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border ${
                       isDark 
                         ? 'bg-primary/15 text-primary-light border-primary/30' 
-                        : 'bg-blue-50 text-blue-700 border-blue-200'
+                        : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     }`}>
                       SQLite B-Tree
                     </span>
                   </div>
 
                   <div className="flex items-baseline gap-2">
-                    <span className={`text-2xl font-black font-mono ${
-                      isDark ? 'text-white' : 'text-slate-950'
-                    }`}>
-                      {(telemetry.sqlite_row_count || 26872).toLocaleString()}
-                    </span>
-                    <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Records</span>
+                    <AnimatedCounter
+                      value={telemetry.sqlite_row_count || 26872}
+                      formatLocale
+                      className={`text-2xl font-black font-mono ${
+                        isDark ? 'text-white' : 'text-slate-950'
+                      }`}
+                    />
+                    <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Records</span>
                   </div>
 
                   <div className={`mt-2 pt-2 border-t flex items-center justify-between text-[10px] font-mono ${
-                    isDark ? 'border-slate-800 text-slate-400' : 'border-slate-100 text-slate-500'
+                    isDark ? 'border-slate-800/80 text-slate-400' : 'border-emerald-100 text-slate-600'
                   }`}>
                     <span>data/nexus_structured.db</span>
                     <span>·</span>
                     <span>0ms Index Scan</span>
                   </div>
-                </div>
+                </SpotlightTiltCard>
               </div>
 
               {/* 8 SHOWCASE ARCHITECTURE ENGINEERING TEST CASES (2x4 Grid) */}
@@ -853,105 +911,119 @@ function App() {
                   <span className={`text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 ${
                     isDark ? 'text-slate-400' : 'text-slate-600'
                   }`}>
-                    <Terminal className="w-3.5 h-3.5 text-primary-light" />
+                    <Terminal className="w-3.5 h-3.5 text-accent-emerald" />
                     Engineering Test Cases & Benchmark Presets
                   </span>
-                  <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                  <span className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
                     Click any card to execute deterministic branch
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-left">
+                <motion.div
+                  variants={PRESET_GRID_VARIANTS}
+                  initial="hidden"
+                  animate="visible"
+                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-left"
+                >
                   {SHOWCASE_PRESETS.map((item, idx) => (
-                    <motion.button 
+                    <motion.div
                       key={item.id || idx}
-                      whileHover={{ y: -3, scale: 1.01 }}
-                      whileTap={{ scale: 0.98 }}
-                      onClick={() => handlePresetClick(item.query)}
-                      className={`p-4 rounded-2xl border flex flex-col justify-between gap-3 text-left transition-all group relative overflow-hidden ${
-                        isDark 
-                          ? `bg-[#111827] border-[#1E293B] ${item.hoverBorderDark}` 
-                          : `bg-white border-slate-200 ${item.hoverBorderLight} shadow-xs`
-                      }`}
+                      variants={PRESET_CARD_VARIANTS}
+                      className="h-full"
                     >
-                      {/* Top metadata row */}
-                      <div className="flex items-center justify-between gap-2">
-                        <span className={`text-[9px] font-mono font-bold ${
-                          isDark ? 'text-slate-500' : 'text-slate-400'
-                        }`}>
-                          {item.code}
-                        </span>
-                        <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${
-                          isDark ? item.badgeStyleDark : item.badgeStyleLight
-                        }`}>
-                          {item.badge}
-                        </span>
-                      </div>
-
-                      {/* Title & prompt query */}
-                      <div className="space-y-1.5 flex-1">
-                        <div className={`text-xs font-bold transition-colors line-clamp-1 ${
-                          isDark ? 'text-slate-200 group-hover:text-white' : 'text-slate-800 group-hover:text-slate-950'
-                        }`}>
-                          {item.title}
+                      <SpotlightTiltCard
+                        as="button"
+                        theme={theme}
+                        whileTap={{ scale: 0.985 }}
+                        onClick={() => handlePresetClick(item.query)}
+                        className={`w-full h-full p-4 rounded-2xl border backdrop-blur-md flex flex-col justify-between gap-3 text-left transition-colors group ${
+                          isDark 
+                            ? `bg-[#0F1629]/75 border-[#1E293B] ${item.hoverBorderDark}` 
+                            : `bg-white/80 border-emerald-200/75 ${item.hoverBorderLight} shadow-xs`
+                        }`}
+                      >
+                        {/* Top metadata row */}
+                        <div className="flex items-center justify-between gap-2 mb-2.5">
+                          <span className={`text-[9px] font-mono font-bold ${
+                            isDark ? 'text-slate-500' : 'text-slate-500'
+                          }`}>
+                            {item.code}
+                          </span>
+                          <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${
+                            isDark ? item.badgeStyleDark : item.badgeStyleLight
+                          }`}>
+                            {item.badge}
+                          </span>
                         </div>
-                        <p className={`text-[11px] leading-relaxed line-clamp-3 ${
-                          isDark ? 'text-slate-400 group-hover:text-slate-300' : 'text-slate-600 group-hover:text-slate-700'
-                        }`}>
-                          "{item.query}"
-                        </p>
-                      </div>
 
-                      {/* Footer trigger cue */}
-                      <div className={`pt-2 border-t flex items-center justify-between text-[10px] font-mono transition-colors ${
-                        isDark 
-                          ? 'border-slate-800 text-slate-500 group-hover:text-primary-light' 
-                          : 'border-slate-100 text-slate-400 group-hover:text-blue-600'
-                      }`}>
-                        <span className="truncate max-w-[130px]">{item.target}</span>
-                        <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform flex-shrink-0" />
-                      </div>
-                    </motion.button>
+                        {/* Title & prompt query */}
+                        <div className="space-y-1.5 flex-1">
+                          <div className={`text-xs font-bold transition-colors line-clamp-1 ${
+                            isDark ? 'text-slate-100 group-hover:text-white' : 'text-slate-800 group-hover:text-slate-950'
+                          }`}>
+                            {item.title}
+                          </div>
+                          <p className={`text-[11px] leading-relaxed line-clamp-3 ${
+                            isDark ? 'text-slate-400 group-hover:text-slate-300' : 'text-slate-600 group-hover:text-slate-800'
+                          }`}>
+                            "{item.query}"
+                          </p>
+                        </div>
+
+                        {/* Footer trigger cue */}
+                        <div className={`mt-3 pt-2 border-t flex items-center justify-between text-[10px] font-mono transition-colors ${
+                          isDark 
+                            ? 'border-slate-800/80 text-slate-500 group-hover:text-accent-emerald' 
+                            : 'border-emerald-100 text-slate-500 group-hover:text-emerald-700'
+                        }`}>
+                          <span className="truncate max-w-[130px]">{item.target}</span>
+                          <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform flex-shrink-0" />
+                        </div>
+                      </SpotlightTiltCard>
+                    </motion.div>
                   ))}
-                </div>
+                </motion.div>
               </div>
             </motion.div>
           )}
 
           {/* Chat Messages */}
-          <AnimatePresence>
+          <AnimatePresence initial={false}>
             {messages.map((m) => (
               <motion.div 
                 key={m.id}
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3 }}
+                initial={{ opacity: 0, y: 16, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.96 }}
+                transition={{ type: 'spring', stiffness: 360, damping: 28, mass: 0.75 }}
                 className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div className={`flex gap-3.5 max-w-[85%] ${m.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
                   {/* User / Bot Avatar */}
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 shadow-md ${
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 shadow-md backdrop-blur-md ${
                     m.role === 'user' 
-                      ? 'bg-primary border border-white/20' 
-                      : isDark ? 'bg-[#111827] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
+                      ? 'bg-gradient-to-tr from-accent-emerald to-indigo-600 border border-white/20' 
+                      : isDark ? 'bg-[#0F1629]/85 border border-[#1E293B]' : 'bg-white/90 border border-emerald-200/80 shadow-xs'
                   }`}>
-                    {m.role === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-primary" />}
+                    {m.role === 'user' ? <User className="w-5 h-5 text-white" /> : <Bot className="w-5 h-5 text-accent-emerald" />}
                   </div>
 
                   <div className={`space-y-2 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
-                    <div className={`relative p-4 md:p-5 rounded-2xl shadow-sm leading-relaxed text-sm ${
+                    <div className={`relative p-4 md:p-5 rounded-2xl shadow-sm leading-relaxed text-sm backdrop-blur-md ${
                       m.role === 'user' 
-                        ? 'bg-primary text-white rounded-tr-none' 
+                        ? isDark
+                          ? 'bg-gradient-to-br from-indigo-600 to-emerald-700 text-white rounded-tr-none border border-white/10'
+                          : 'bg-gradient-to-br from-emerald-600 to-teal-700 text-white rounded-tr-none shadow-emerald-900/10'
                         : isDark 
-                        ? 'bg-[#111827] border border-[#1E293B] text-slate-200 rounded-tl-none' 
-                        : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none shadow-xs'
+                        ? 'bg-[#0F1629]/80 border border-[#1E293B] text-slate-100 rounded-tl-none' 
+                        : 'bg-white/85 border border-emerald-200/80 text-slate-800 rounded-tl-none shadow-xs'
                     }`}>
                       <div className="whitespace-pre-wrap">{m.content}</div>
 
                       {/* Bot Message Metadata Bar */}
                       {m.role === 'bot' && (
                         <div className={`mt-3 pt-2 border-t flex flex-wrap items-center gap-4 text-[9px] font-bold uppercase tracking-widest ${
-                          isDark ? 'border-slate-800 text-slate-500' : 'border-slate-100 text-slate-400'
+                          isDark ? 'border-slate-800 text-slate-400' : 'border-emerald-100 text-slate-500'
                         }`}>
                           <span className="flex items-center gap-1">
                             <CheckCircle className="w-3 h-3 text-accent-emerald" /> 
@@ -969,7 +1041,7 @@ function App() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className={`flex items-center gap-2.5 p-3.5 rounded-xl text-xs font-bold border ${
+                        className={`flex items-center gap-2.5 p-3.5 rounded-xl text-xs font-bold border backdrop-blur-md ${
                           isDark 
                             ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' 
                             : 'bg-amber-50 border-amber-300 text-amber-800'
@@ -986,34 +1058,42 @@ function App() {
           </AnimatePresence>
 
           {/* Loading Indicator */}
-          {loading && (
-            <div className="flex justify-start">
-              <div className="flex gap-3.5">
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center border ${
-                  isDark ? 'bg-[#111827] border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-                }`}>
-                  <Bot className="w-5 h-5 text-primary animate-pulse" />
-                </div>
-                <div className={`p-4 rounded-2xl rounded-tl-none flex items-center gap-2 border ${
-                  isDark ? 'bg-[#111827]/60 border-[#1E293B]' : 'bg-white border-slate-200 shadow-xs'
-                }`}>
-                  <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2 }} className="w-1.5 h-1.5 bg-primary rounded-full" />
-                  <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.2 }} className="w-1.5 h-1.5 bg-primary rounded-full" />
-                  <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.4 }} className="w-1.5 h-1.5 bg-primary rounded-full" />
-                  <span className={`ml-2 text-xs font-bold font-mono uppercase tracking-wider ${
-                    isDark ? 'text-slate-400' : 'text-slate-600'
+          <AnimatePresence>
+            {loading && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -6, scale: 0.96 }}
+                transition={{ type: 'spring', stiffness: 360, damping: 28 }}
+                className="flex justify-start"
+              >
+                <div className="flex gap-3.5">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center border backdrop-blur-md ${
+                    isDark ? 'bg-[#0F1629]/85 border-[#1E293B]' : 'bg-white/90 border-emerald-200/80 shadow-xs'
                   }`}>
-                    Executing LangGraph Pipeline...
-                  </span>
+                    <Bot className="w-5 h-5 text-accent-emerald animate-pulse" />
+                  </div>
+                  <div className={`p-4 rounded-2xl rounded-tl-none flex items-center gap-2 border backdrop-blur-md ${
+                    isDark ? 'bg-[#0F1629]/75 border-[#1E293B]' : 'bg-white/85 border-emerald-200/80 shadow-xs'
+                  }`}>
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2 }} className="w-1.5 h-1.5 bg-accent-emerald rounded-full" />
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.2 }} className="w-1.5 h-1.5 bg-accent-emerald rounded-full" />
+                    <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.2, delay: 0.4 }} className="w-1.5 h-1.5 bg-accent-emerald rounded-full" />
+                    <span className={`ml-2 text-xs font-bold font-mono uppercase tracking-wider ${
+                      isDark ? 'text-slate-300' : 'text-slate-700'
+                    }`}>
+                      Executing LangGraph Pipeline...
+                    </span>
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Bottom Input Area & Quick-Prompt Bar */}
-        <footer className={`p-6 md:p-7 border-t transition-colors ${
-          isDark ? 'bg-[#090D16]/95 border-[#1E293B]' : 'bg-white/95 border-[#E2E8F0] shadow-sm'
+        <footer className={`p-6 md:p-7 border-t backdrop-blur-md transition-colors ${
+          isDark ? 'bg-[#090D18]/85 border-[#1E293B]' : 'bg-white/85 border-emerald-200/75 shadow-sm'
         }`}>
           {/* Scrollable Quick-Prompt Bar when conversation is active */}
           {messages.length > 0 && (
@@ -1022,7 +1102,7 @@ function App() {
                 <div className={`flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider flex-shrink-0 mr-1 ${
                   isDark ? 'text-slate-400' : 'text-slate-600'
                 }`}>
-                  <Sparkles className="w-3 h-3 text-primary-light" />
+                  <Sparkles className="w-3 h-3 text-accent-emerald" />
                   <span>Showcase Presets:</span>
                 </div>
                 {[...SHOWCASE_PRESETS, ...customPrompts].map((item, idx) => (
@@ -1035,7 +1115,7 @@ function App() {
                     className={`flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-xs font-medium transition-all ${
                       item.isCustom
                         ? isDark ? 'bg-accent-emerald/10 border-accent-emerald/30 text-slate-200' : 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                        : isDark ? 'bg-[#111827] border-[#1E293B] text-slate-300 hover:text-white' : 'bg-slate-50 border-slate-200 text-slate-700 hover:text-slate-900 shadow-xs'
+                        : isDark ? 'bg-[#0F1629]/85 border-[#1E293B] text-slate-300 hover:text-white' : 'bg-white/90 border-emerald-200/80 text-slate-700 hover:text-slate-900 shadow-xs'
                     }`}
                     title={item.query}
                   >
@@ -1043,7 +1123,7 @@ function App() {
                     <span className={`text-[9px] font-mono px-1 py-0.2 rounded font-bold uppercase ${
                       isDark 
                         ? (item.badgeStyleDark || 'bg-white/10 text-slate-300') 
-                        : (item.badgeStyleLight || 'bg-slate-100 text-slate-700')
+                        : (item.badgeStyleLight || 'bg-emerald-50 text-emerald-800')
                     }`}>
                       {item.badge}
                     </span>
@@ -1069,24 +1149,24 @@ function App() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Query knowledge base, look up orders (#7721), or test security guardrails..."
-                className={`w-full rounded-2xl py-4 pl-6 pr-28 text-sm font-medium border transition-all focus:outline-none focus:ring-2 ${
+                className={`w-full rounded-2xl py-4 pl-6 pr-28 text-sm font-medium border backdrop-blur-md transition-all focus:outline-none focus:ring-2 ${
                   isDark 
-                    ? 'bg-[#111827] border-[#1E293B] text-slate-100 placeholder:text-slate-500 focus:border-primary/50 focus:ring-primary/20' 
-                    : 'bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400 focus:border-primary/50 focus:ring-primary/20 shadow-xs'
+                    ? 'bg-[#0F1629]/85 border-[#1E293B] text-slate-100 placeholder:text-slate-500 focus:border-accent-emerald/60 focus:ring-accent-emerald/20' 
+                    : 'bg-white/90 border-emerald-200/80 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500/60 focus:ring-emerald-500/20 shadow-xs'
                 }`}
               />
               <div className="absolute right-3 flex items-center gap-2">
                  <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-mono ${
-                   isDark ? 'bg-white/5 border-white/5 text-slate-400' : 'bg-white border-slate-200 text-slate-500'
+                   isDark ? 'bg-white/5 border-white/5 text-slate-400' : 'bg-emerald-50/70 border-emerald-200 text-emerald-800'
                  }`}>
-                    <span className="w-1.5 h-1.5 bg-accent-cyan rounded-full animate-pulse" /> SSE Ready
+                    <span className="w-1.5 h-1.5 bg-accent-emerald rounded-full animate-pulse" /> SSE Ready
                  </div>
                  <motion.button 
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     type="submit" 
                     disabled={loading || !query.trim()}
-                    className="w-10 h-10 bg-primary hover:brightness-110 rounded-xl flex items-center justify-center transition-all disabled:opacity-30 disabled:grayscale shadow-md shadow-primary/20"
+                    className="w-10 h-10 bg-gradient-to-tr from-accent-emerald to-indigo-600 hover:brightness-110 rounded-xl flex items-center justify-center transition-all disabled:opacity-30 disabled:grayscale shadow-md shadow-emerald-500/20"
                   >
                     <Send className="w-4 h-4 text-white" />
                   </motion.button>
