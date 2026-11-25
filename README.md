@@ -1,4 +1,4 @@
-﻿---
+---
 Title: Nexus RAG v2.0 API
 emoji: 🛡️
 colorFrom: blue
@@ -12,7 +12,7 @@ app_port: 7860
 [![Live AI Control Plane](https://img.shields.io/badge/Live%20AI%20Control%20Plane-Vercel%20Production-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://nexus-rag-control-plane.vercel.app)
 [![FastAPI Swagger Docs](https://img.shields.io/badge/FastAPI%20Swagger%20Docs-Render%20Cloud-46E3B7?style=for-the-badge&logo=render&logoColor=white)](https://nexus-rag-backend-p9i0.onrender.com/docs)
 [![Ragas Evaluation Score](https://img.shields.io/badge/Ragas%20Score-0.9404-brightgreen?style=for-the-badge&logo=target&logoColor=white)](#3-benchmark--evaluation-results)
-[![Test Suite](https://img.shields.io/badge/Tests-54%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)](#4-run-pytest-verification-suite)
+[![Test Suite](https://img.shields.io/badge/Tests-82%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)](#4-run-pytest-verification-suite)
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com)
@@ -30,12 +30,12 @@ An enterprise-grade, agentic Customer Support Retrieval-Augmented Generation (RA
 
 ## 🖥️ AI Control Plane UI Showcase
 
-The Nexus RAG v2.0 AI Control Plane features an adaptive dark/light interface built with React 18, Vite, and Tailwind CSS. It delivers zero-latency Server-Sent Events (SSE) streaming telemetry, real-time chunk scoring, one-click scenario testing, and deep architectural visibility.
+The Nexus RAG v2.0 AI Control Plane features an adaptive dark/light glassmorphic interface built with React, Vite, Tailwind CSS, Framer Motion, and React Flow (`@xyflow/react`). It delivers an **Inline Live SSE Pipeline Strip** (`LivePipelineStrip.jsx`), an **Interactive 4-Branch StateGraph Visualizer** (`PipelineArchitectureModal.jsx`), **Framer Motion 3D tilt spotlight cards** (`SpotlightTiltCard.jsx`), and a glassmorphic **1-Click Demo Login** modal (`AuthModal.jsx`) with RBAC controls and live `HTTP 429` cooldown countdowns.
 
 | Dark Mode & Live SSE Retrieval Inspector | Light Mode Enterprise Control Plane | Interactive Architecture Modal |
 | :---: | :---: | :---: |
 | [![Dark Mode Control Plane](docs/screenshots/control-plane-dark.png)](docs/screenshots/control-plane-dark.png) | [![Light Mode Control Plane](docs/screenshots/control-plane-light.png)](docs/screenshots/control-plane-light.png) | [![Architecture Modal](docs/screenshots/architecture-modal.png)](docs/screenshots/architecture-modal.png) |
-| **Dark Mode & Retrieval Inspector**<br>Live SSE telemetry badges (`HIT 96.5%` vs `MISS`), Top-4 FlashRank neural reranking scores, query reformulation cycles, and HITL supervisor override input. | **Light Mode Enterprise View**<br>Multi-format enterprise knowledge upload modal (`.pdf`, `.xlsx`, `.csv`, `.md`), persistent dynamic scenario quick-prompt bar, and chat history. | **Interactive Pipeline Visualizer**<br>Modal illustrating the 4-branch routing topology, safe refusal guardrail, order tool database query, and CRAG relevance grading cycle. |
+| **Dark Mode & Retrieval Inspector**<br>Inline live SSE pipeline strip, telemetry badges (`HIT 96.5%` vs `MISS`), Top-4 FlashRank neural reranking scores, and RBAC-gated HITL supervisor override input. | **Light Mode Enterprise View**<br>Supervisor-gated multi-format knowledge upload modal (`.pdf`, `.xlsx`, `.csv`, `.md`), Framer Motion 3D spotlight test cards (`TEST-01`–`TEST-08`), and glassmorphic 1-Click Demo Login. | **Interactive React Flow Visualizer**<br>Live `@xyflow/react` 4-branch StateGraph visualizer illustrating safe refusal guardrails, SQLite order tool lookups, CRAG self-correction cycles, and HITL interrupts. |
 
 ---
 
@@ -111,50 +111,80 @@ Hosting Python RAG applications on modern cloud container tiers (such as Render'
 
 ```mermaid
 flowchart TD
-    Client["Client Interface\n(React Vite Frontend)"] --> API["FastAPI Gateway\n(/api/chat/stream, /ask)"]
+    Client["Client Interface (React Vite + 1-Click Demo AuthModal)"] --> AuthBoundary["FastAPI Auth & RBAC Security Gateway"]
 
-    subgraph SecurityGuardrail["Stage 1: Ingestion & Guardrails"]
-        API --> PII["PII Scrubber\n(Redacts Emails, Phone, Cards)"]
-        PII --> Router["Groq Intent Router\n(openai/gpt-oss-20b)"]
+    subgraph AuthLayer["Stage 0: Auth, Rate Limiting & RBAC Layer (utils/auth.py)"]
+        AuthBoundary --> AuthEndpoints["POST /api/auth/* (Argon2id + HS256 JWT + Sliding-Window 429)"]
+        AuthBoundary --> StreamGate["POST /api/chat/stream (Optional JWT: Guest Mode or Analyst/Supervisor Thread Tracking)"]
+        AuthBoundary --> SupervisorGate["POST /api/ingest/upload & POST /api/chat/resume (Strict Supervisor RBAC Gate)"]
+        SupervisorGate -- "Guest or Analyst (Non-Supervisor)" --> Denied["HTTP 401 / 403 Access Denied"]
+        SupervisorGate -- "Verified Supervisor JWT" --> PrivilegedOps["Knowledge Ingestion & HITL Override"]
     end
 
-    Router -- "prompt_injection" --> SafeRefusal["Safe Refusal Node\n(Refuses system prompt jailbreaks)"]
-    Router -- "escalation_hitl" --> HITL["HITL Supervisor Pause\n(Legal, High Disputes, Complaints)"]
-    Router -- "live_order_tool" --> OrderDB["SQLite Order Tool\n(Order status, tracking, items)"]
+    StreamGate --> PII
 
-    subgraph SemanticCaching["Stage 2: Redis Semantic Cache"]
-        Router -- "safe_rag" --> CacheCheck{"Redis Semantic Cache\n(Cosine Sim >= 0.92)"}
-        CacheCheck -- "HIT (< 15ms)" --> SSEHit["Emit 'cache_hit' SSE Event"]
+    subgraph SecurityGuardrail["Stage 1: Ingestion & Guardrails (4-Branch LangGraph StateGraph)"]
+        PII["PII Scrubber (Redacts Emails, Phone, Cards)"]
+        PII --> Router["Groq Intent Router (openai/gpt-oss-20b)"]
+    end
+
+    Router -- "Branch 1: prompt_injection" --> SafeRefusal["Safe Refusal Node (Refuses System Prompt Jailbreaks)"]
+    Router -- "Branch 2: escalation_hitl" --> HITL["HITL Supervisor Pause (Legal, High Disputes, Complaints)"]
+    PrivilegedOps -. "Resumes Paused Checkpoint" .-> HITL
+    Router -- "Branch 3: live_order_tool" --> OrderDB["SQLite Order Tool (Order Status, Tracking, Items)"]
+
+    subgraph SemanticCaching["Stage 2: Redis Semantic Cache (Branch 4: safe_rag)"]
+        Router -- "Branch 4: safe_rag" --> CacheCheck{"Redis Semantic Cache (Cosine Sim >= 0.92)"}
+        CacheCheck -- "HIT (< 15ms)" --> SSEHit["Emit cache_hit SSE Event"]
         SSEHit --> FastPath["Bypass Retrieval & LLM Generation"]
     end
 
     subgraph HybridEngine["Stage 3: Hybrid Retrieval & Ranking"]
-        CacheCheck -- "MISS / Offline Fallback" --> Dense["Dense Vector Search\n(ChromaDB all-MiniLM-L6-v2)"]
-        CacheCheck -- "MISS / Offline Fallback" --> Sparse["Sparse Keyword Search\n(BM25Okapi)"]
-        Dense --> RRF["Reciprocal Rank Fusion\n(RRF k=60)"]
+        CacheCheck -- "MISS / Offline Fallback" --> Dense["Dense Vector Search (ChromaDB all-MiniLM-L6-v2)"]
+        CacheCheck -- "MISS / Offline Fallback" --> Sparse["Sparse Keyword Search (BM25Okapi)"]
+        Dense --> RRF["Reciprocal Rank Fusion (RRF k=60)"]
         Sparse --> RRF
-        RRF --> FlashRank["FlashRank Neural Reranker\n(ms-marco-MiniLM-L-12-v2, Top-4)"]
+        RRF --> FlashRank["FlashRank Neural Reranker (ms-marco-MiniLM-L-12-v2, Top-4)"]
     end
 
     subgraph CorrectiveRAG["Stage 4: Corrective RAG (CRAG)"]
-        FlashRank --> Grader["CRAG Document Relevance Grader\n(openai/gpt-oss-20b)"]
+        FlashRank --> Grader["CRAG Document Relevance Grader (openai/gpt-oss-20b)"]
         Grader -- "Irrelevant (Max 1 Retry)" --> Rewrite["Query Reformulation Assistant"]
         Rewrite --> Dense
-        Grader -- "Relevant" --> Generator["Groq Answer Generator\n(openai/gpt-oss-120b)"]
+        Grader -- "Relevant" --> Generator["Groq Answer Generator (openai/gpt-oss-120b)"]
     end
 
     subgraph OutputObservability["Stage 5: Output & Observability"]
-        Generator --> CacheSave["Async Background Write to Redis\n(TTL: 86400s)"]
+        Generator --> CacheSave["Async Background Write to Redis (TTL: 86400s)"]
         Generator --> StreamResponse["Server-Sent Events (SSE) Stream"]
         FastPath --> StreamResponse
         StreamResponse --> Langfuse["Langfuse Cloud Tracing"]
-        StreamResponse --> Inspector["Retrieval Inspector UI Panel"]
+        StreamResponse --> Inspector["Live SSE Strip, Retrieval Inspector & React Flow Visualizer"]
     end
 ```
 
 ---
 
 ## 2. Core Capabilities & Production Layer
+
+### Enterprise Auth, Rate Limiting & RBAC (`utils/auth.py`)
+
+- **Memory-Safe Argon2id Hashing**: Configured with OWASP container-safe parameters (`19 MiB` RAM cost, `time_cost=2`, `parallelism=1`) to prevent OOM spikes on 512 MB Render containers.
+- **Dual-Token HS256 JWT + Refresh Rotation**: Issues 15-minute `HS256` JWT access tokens alongside 7-day rotating refresh tokens (`HttpOnly; Secure; SameSite=None` cookies with SHA-256 hashes persisted in SQLite `refresh_sessions` and `sessionStorage` cross-origin fallback).
+- **Proxy-Aware Sliding-Window Rate Limiter**: Enforces `5 logins/min`, `3 signups/hr`, and `20 refreshes/min` using Redis `ZSET` when reachable with a thread-safe in-memory `deque` fallback, returning `HTTP 429` (`Retry-After`) plus a 15-minute account lockout after 5 consecutive failed logins.
+- **Guest-First + Role-Based Access Control**: Guests and `Analyst` (`user`) accounts can execute queries and all 8 showcase presets (`TEST-01`–`TEST-08`) with authenticated thread tracking in SQLite (`user_threads`), while `POST /api/ingest/upload` and `POST /api/chat/resume` strictly require `Supervisor` (`supervisor`) clearance (`HTTP 401/403` otherwise).
+
+| Demo Role | Header Badge | Email | Password | Access Scope |
+| :--- | :---: | :--- | :--- | :--- |
+| **Analyst** (`user`) | `ANALYST` | `user@nexusrag.ai` | `DemoUser@2026!` | Guest-parity chat, presets `TEST-01`–`TEST-08`, SQLite thread history |
+| **Supervisor** (`supervisor`) | `SUPERVISOR` | `supervisor@nexusrag.ai` | `Supervisor@2026!` | Full access including document ingestion & HITL escalation overrides |
+
+### Interactive Control Plane, Live SSE Strip & React Flow Visualizer (`frontend/src/`)
+
+- **Inline Live SSE Pipeline Strip (`LivePipelineStrip.jsx`)**: Streams real-time stage badges (`Guardrail`, `Semantic Cache`, `Hybrid RRF`, `FlashRank`, `CRAG Grader`, `Generator`) and active branch indicators directly above the chat input.
+- **Interactive React Flow Visualizer (`PipelineArchitectureModal.jsx`)**: Uses `@xyflow/react` to render the live 4-branch LangGraph StateGraph topology with animated execution edges, node inspection details, and live latencies.
+- **Glassmorphic 1-Click Demo Login (`AuthModal.jsx`)**: Supports Sign In / Create Account tabs, live 5-rule password complexity validation, `HTTP 429` countdown timers, and zero-typing 1-Click Demo buttons for both `Analyst` and `Supervisor` roles.
+- **Framer Motion 3D Tilt Spotlight Cards (`SpotlightTiltCard.jsx`)**: Powers the telemetry cards and `TEST-01`–`TEST-08` scenario grid with cursor-tracked spotlight gradients.
 
 ### Redis Semantic Caching (`utils/semantic_cache.py`)
 
@@ -316,18 +346,22 @@ python ingest.py
 
 ### 4. Run Pytest Verification Suite
 
-Verify all **54 unit and integration tests** covering ONNX embeddings, hybrid retrieval, file uploads, semantic caching, and SSE observability:
+Verify all **82 passing tests** across the unit and integration test suite:
 
 ```bash
 pytest tests/ -v
 ```
 
 *The test suite covers:*
+- `tests/test_auth.py` (Argon2id hashing, HS256 JWT lifecycle, refresh token rotation, sliding-window 429 rate limiting, account lockout, and Supervisor RBAC gates)
+- `tests/test_crag_and_hitl.py` (CRAG relevance grading, bounded query reformulation loops, and HITL interrupt/resume checkpoints)
 - `tests/test_embeddings.py` (FastEmbed ONNX vector generation, model normalization, backward compatibility)
+- `tests/test_guardrail_and_router.py` (PII auto-redaction, prompt injection defense, and 4-branch deterministic routing)
 - `tests/test_hybrid_retriever.py` (RRF mathematics $k=60$, deduplication, score normalization, hybrid fusion)
-- `tests/test_upload_and_presets.py` (Multi-format ingestion, unstructured & structured chunking, scenario isolation)
-- `tests/test_semantic_cache.py` (Redis cosine similarity $\ge 0.92$, fail-open fallback, TTL expiration)
 - `tests/test_observability_and_sse.py` (SSE event streaming, Langfuse tracing hooks, HITL supervisor events)
+- `tests/test_semantic_cache.py` (Redis cosine similarity $\ge 0.92$, fail-open fallback, TTL expiration)
+- `tests/test_telemetry.py` (Live telemetry aggregation across RAGAS scores, ChromaDB, BM25, and SQLite)
+- `tests/test_upload_and_presets.py` (Multi-format ingestion, unstructured & structured chunking, scenario isolation)
 
 ### 5. Run Automated Ragas Evaluation
 
