@@ -14,6 +14,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
 
 from config import settings
+from utils.auth import init_auth_db, seed_demo_users
 
 def tokenize_corpus_text(text: str) -> List[str]:
     """Tokenizes text into lowercase alphanumeric tokens for BM25."""
@@ -307,6 +308,11 @@ def run_full_ingestion():
     # 1. Structured CSV -> SQLite
     csv_file = "Customer_Support_Training_Dataset.csv"
     ingest_csv_to_sqlite(csv_file)
+
+    # 1b. Auth Schema & Pre-Seeded Demo Accounts -> SQLite
+    print("[Auth DB] Initializing auth tables and seeding demo accounts...")
+    init_auth_db()
+    seed_demo_users()
 
     # 2. Documents & PDFs -> ChromaDB + BM25
     ingest_documents_dual_index()

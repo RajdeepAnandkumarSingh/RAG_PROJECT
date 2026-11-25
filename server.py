@@ -2,37 +2,92 @@ import os
 import json
 import time
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional, Dict, Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    BackgroundTasks,
+    UploadFile,
+    File,
+    Depends,
+    Request,
+    Response,
+    Body,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr, field_validator
 
 from main import app as graph_app
 from config import settings
 from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 from utils.semantic_cache import get_semantic_cache
+from utils.auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    AccountLockedError,
+    InvalidCredentialsError,
+    InvalidRefreshTokenError,
+    REFRESH_COOKIE_NAME,
+    UserAlreadyExistsError,
+    authenticate_user,
+    clear_refresh_cookie,
+    create_access_token,
+    create_refresh_session,
+    create_user,
+    get_optional_user,
+    init_auth_db,
+    rate_limit_login,
+    rate_limit_refresh,
+    rate_limit_signup,
+    record_user_thread,
+    require_supervisor,
+    revoke_refresh_session,
+    rotate_refresh_session,
+    seed_demo_users,
+    set_refresh_cookie,
+)
 from ingest import process_uploaded_file
+
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    await asyncio.to_thread(init_auth_db)
+    await asyncio.to_thread(seed_demo_users)
+    yield
+    await get_semantic_cache().close()
+
 
 server = FastAPI(
     title="Nexus RAG v2.0 API",
-    description="Customer Support RAG with Langfuse Observability, SSE Streaming, Hybrid Search, FlashRank Reranker, CRAG, and HITL"
+    description="Customer Support RAG with Langfuse Observability, SSE Streaming, Hybrid Search, FlashRank Reranker, CRAG, and HITL",
+    lifespan=lifespan,
 )
 app = server  # ASGI callable alias for uvicorn server:app
 
-# Parse optional ALLOWED_ORIGINS env var (defaulting to ["*"] when unset)
+# Explicit CORS origins required for cross-origin credentials/cookies
+allowed_origins: List[str] = [
+    "https://nexus-rag-control-plane.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+frontend_url = (os.getenv("FRONTEND_URL") or settings.FRONTEND_URL or "").strip()
+if frontend_url and frontend_url not in allowed_origins:
+    allowed_origins.append(frontend_url)
+
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
 if allowed_origins_env and allowed_origins_env != "*":
     if allowed_origins_env.startswith("[") and allowed_origins_env.endswith("]"):
         try:
-            allowed_origins = json.loads(allowed_origins_env)
+            extra_origins = json.loads(allowed_origins_env)
         except Exception:
-            allowed_origins = [o.strip() for o in allowed_origins_env.strip("[]").split(",") if o.strip()]
+            extra_origins = [o.strip() for o in allowed_origins_env.strip("[]").split(",") if o.strip()]
     else:
-        allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
-else:
-    allowed_origins = ["*"]
+        extra_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+    for origin in extra_origins:
+        if origin and origin != "*" and origin not in allowed_origins:
+            allowed_origins.append(origin)
 
 # Enable CORS for React frontend (Vercel preview & production)
 server.add_middleware(
@@ -42,6 +97,62 @@ server.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class UserPublic(BaseModel):
+    id: str
+    email: EmailStr
+    full_name: str
+    name: str
+    role: str
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    full_name: str = Field(..., min_length=2, max_length=60)
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_full_name(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_complexity(cls, v: str) -> str:
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must include at least one uppercase letter.")
+        if not any(c.islower() for c in v):
+            raise ValueError("Password must include at least one lowercase letter.")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must include at least one digit.")
+        if not any(not c.isalnum() and not c.isspace() for c in v):
+            raise ValueError("Password must include at least one special character.")
+        return v
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=1)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: Optional[str] = None
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    user: UserPublic
+
+
+class AuthMeResponse(BaseModel):
+    authenticated: bool
+    user: Optional[UserPublic] = None
 
 class QueryRequest(BaseModel):
     query: str
@@ -184,6 +295,107 @@ def format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     data = {"event": event_name, "stage": event_name, **payload}
     return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
+@server.post("/api/auth/signup", response_model=AuthResponse, dependencies=[Depends(rate_limit_signup)])
+async def auth_signup(payload: SignupRequest, response: Response):
+    """Registers a new Analyst ('user') account and issues dual JWT + refresh tokens."""
+    try:
+        user = await asyncio.to_thread(
+            create_user,
+            payload.email,
+            payload.full_name,
+            payload.password,
+            "user",
+        )
+    except UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    refresh_token = await asyncio.to_thread(create_refresh_session, user["id"])
+    access_token = create_access_token(user)
+    set_refresh_cookie(response, refresh_token)
+    return AuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=UserPublic(**user),
+    )
+
+
+@server.post("/api/auth/login", response_model=AuthResponse, dependencies=[Depends(rate_limit_login)])
+async def auth_login(payload: LoginRequest, response: Response):
+    """Authenticates email/password with Argon2id, lockout protection, and dual tokens."""
+    try:
+        user = await asyncio.to_thread(authenticate_user, payload.email, payload.password)
+    except AccountLockedError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Account temporarily locked due to failed attempts. Try again in {exc.retry_after}s.",
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    refresh_token = await asyncio.to_thread(create_refresh_session, user["id"])
+    access_token = create_access_token(user)
+    set_refresh_cookie(response, refresh_token)
+    return AuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=UserPublic(**user),
+    )
+
+
+@server.post("/api/auth/refresh", response_model=AuthResponse, dependencies=[Depends(rate_limit_refresh)])
+async def auth_refresh(
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = Body(default=None),
+):
+    """Rotates a refresh token (via HttpOnly cookie or JSON payload) and issues fresh tokens."""
+    token = (body.refresh_token if body and body.refresh_token else None) or request.cookies.get(
+        REFRESH_COOKIE_NAME
+    )
+    if not token:
+        raise HTTPException(status_code=401, detail="Refresh token missing.")
+
+    try:
+        user, new_refresh_token = await asyncio.to_thread(rotate_refresh_session, token)
+    except InvalidRefreshTokenError:
+        clear_refresh_cookie(response)
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
+
+    access_token = create_access_token(user)
+    set_refresh_cookie(response, new_refresh_token)
+    return AuthResponse(
+        access_token=access_token,
+        refresh_token=new_refresh_token,
+        user=UserPublic(**user),
+    )
+
+
+@server.post("/api/auth/logout")
+async def auth_logout(
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = Body(default=None),
+):
+    """Revokes the active refresh session in SQLite and clears the refresh cookie."""
+    token = (body.refresh_token if body and body.refresh_token else None) or request.cookies.get(
+        REFRESH_COOKIE_NAME
+    )
+    if token:
+        await asyncio.to_thread(revoke_refresh_session, token)
+    clear_refresh_cookie(response)
+    return {"status": "success", "message": "Logged out successfully."}
+
+
+@server.get("/api/auth/me", response_model=AuthMeResponse)
+async def auth_me(current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    """Returns authentication state and decoded user profile (or null in Guest Mode)."""
+    return AuthMeResponse(
+        authenticated=current_user is not None,
+        user=UserPublic(**current_user) if current_user else None,
+    )
+
+
 @server.get("/api/telemetry", response_model=TelemetryResponse)
 @server.get("/telemetry", response_model=TelemetryResponse)
 async def get_telemetry():
@@ -258,12 +470,23 @@ async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
 
 @server.post("/api/chat/stream")
 @server.post("/chat/stream")
-async def chat_stream(request: QueryRequest):
+async def chat_stream(
+    request: QueryRequest,
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
     """
     Asynchronous Server-Sent Events (SSE) streaming endpoint emitting structured events
     for each pipeline stage: guardrail_route, retrieval_results, crag_grade,
     hitl_paused, final_response, and done.
     """
+    if current_user is not None:
+        await asyncio.to_thread(
+            record_user_thread,
+            request.thread_id,
+            current_user["id"],
+            request.query,
+        )
+
     handler = get_langfuse_callback(
         session_id=request.thread_id,
         metadata={"thread_id": request.thread_id, "endpoint": "/api/chat/stream"}
@@ -534,7 +757,11 @@ async def chat_stream(request: QueryRequest):
 
 @server.post("/api/chat/resume", response_model=ChatResponse)
 @server.post("/chat/resume", response_model=ChatResponse)
-async def resume_chat(request: ResumeRequest, background_tasks: BackgroundTasks):
+async def resume_chat(
+    request: ResumeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Dict[str, Any] = Depends(require_supervisor),
+):
     """
     Resumes a thread paused at human_review_node with supervisor response override.
     """
@@ -595,9 +822,13 @@ async def resume_chat(request: ResumeRequest, background_tasks: BackgroundTasks)
             background_tasks.add_task(flush_langfuse, handler)
         raise HTTPException(status_code=500, detail=str(e))
 
+@server.post("/api/upload", response_model=UploadResponse)
 @server.post("/api/ingest/upload", response_model=UploadResponse)
 @server.post("/ingest/upload", response_model=UploadResponse)
-async def upload_knowledge_file(file: UploadFile = File(...)):
+async def upload_knowledge_file(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(require_supervisor),
+):
     """
     Live Multi-Format Organization Upload Endpoint:
     - Accepts .pdf, .xlsx, .xls, .csv, .md, .txt

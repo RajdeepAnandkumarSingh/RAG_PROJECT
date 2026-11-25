@@ -1,5 +1,6 @@
 import io
 import os
+from unittest.mock import patch
 import pytest
 import pandas as pd
 from pathlib import Path
@@ -7,6 +8,19 @@ from httpx import AsyncClient, ASGITransport
 
 from server import server
 from ingest import process_uploaded_file, generate_sample_questions_from_text, generate_sample_questions_from_df
+from utils.auth import create_access_token
+
+
+def _supervisor_headers() -> dict:
+    token = create_access_token(
+        {
+            "id": "test-supervisor-id",
+            "email": "supervisor@nexusrag.ai",
+            "role": "supervisor",
+            "name": "Sarah Chen (Supervisor)",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +62,7 @@ async def test_upload_txt_document():
 
         transport = ASGITransport(app=server)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/ingest/upload", files=files)
+            response = await client.post("/api/ingest/upload", files=files, headers=_supervisor_headers())
             assert response.status_code == 200
             data = response.json()
 
@@ -85,7 +99,7 @@ async def test_upload_csv_dataset():
 
         transport = ASGITransport(app=server)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/ingest/upload", files=files)
+            response = await client.post("/api/ingest/upload", files=files, headers=_supervisor_headers())
             assert response.status_code == 200
             data = response.json()
 
@@ -126,7 +140,7 @@ async def test_upload_xlsx_workbook():
 
         transport = ASGITransport(app=server)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/api/ingest/upload", files=files)
+            response = await client.post("/api/ingest/upload", files=files, headers=_supervisor_headers())
             assert response.status_code == 200
             data = response.json()
 
@@ -154,7 +168,7 @@ async def test_upload_unsupported_file_type():
 
     transport = ASGITransport(app=server)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post("/api/ingest/upload", files=files)
+        response = await client.post("/api/ingest/upload", files=files, headers=_supervisor_headers())
         assert response.status_code == 400
         data = response.json()
         assert "Unsupported file format" in data["detail"]
@@ -162,15 +176,16 @@ async def test_upload_unsupported_file_type():
 
 def test_sample_question_generator_heuristics():
     """Verifies fallback question generation for text and dataframe inputs."""
-    text = "Nexus Enterprise Refund and Warranty Terms. 30 days for return. 1 year for hardware."
-    text_prompts = generate_sample_questions_from_text(text, "refund_terms.md", max_q=3)
-    assert len(text_prompts) >= 2
-    assert all(isinstance(p, str) and len(p) > 5 for p in text_prompts)
+    with patch("ingest.settings.GROQ_API_KEY", ""):
+        text = "Nexus Enterprise Refund and Warranty Terms. 30 days for return. 1 year for hardware."
+        text_prompts = generate_sample_questions_from_text(text, "refund_terms.md", max_q=3)
+        assert len(text_prompts) >= 2
+        assert all(isinstance(p, str) and len(p) > 5 for p in text_prompts)
 
-    df = pd.DataFrame({"order_id": [1, 2], "status": ["shipped", "pending"]})
-    df_prompts = generate_sample_questions_from_df(df, "upload_order_status", "orders.csv", max_q=3)
-    assert len(df_prompts) >= 2
-    assert any("order status" in p.lower() or "records" in p.lower() or "upload" in p.lower() for p in df_prompts)
+        df = pd.DataFrame({"order_id": [1, 2], "status": ["shipped", "pending"]})
+        df_prompts = generate_sample_questions_from_df(df, "upload_order_status", "orders.csv", max_q=3)
+        assert len(df_prompts) >= 2
+        assert any("order status" in p.lower() or "records" in p.lower() or "upload" in p.lower() for p in df_prompts)
 
 
 def test_baseline_presets_queries_defined():

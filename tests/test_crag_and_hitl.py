@@ -21,6 +21,7 @@ from main import (
     app as graph_app
 )
 from server import server
+from utils.auth import create_access_token
 
 def run_async(coro):
     """Helper to run async coroutines in tests reliably without requiring pytest-asyncio plugins."""
@@ -424,21 +425,39 @@ def test_fastapi_ask_and_resume_endpoints():
                 ask_data = ask_resp.json()
                 assert ask_data["status"] == "escalated"
 
+                supervisor_token = create_access_token(
+                    {
+                        "id": "demo-supervisor",
+                        "email": "supervisor@nexusrag.ai",
+                        "role": "supervisor",
+                        "name": "Sarah Chen (Supervisor)",
+                    }
+                )
+                supervisor_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
                 # 2. Resume thread with supervisor override
-                resume_resp = await client.post("/api/chat/resume", json={
-                    "thread_id": thread_id,
-                    "response": "Supervisor resolved the issue: Full refund issued."
-                })
+                resume_resp = await client.post(
+                    "/api/chat/resume",
+                    json={
+                        "thread_id": thread_id,
+                        "response": "Supervisor resolved the issue: Full refund issued."
+                    },
+                    headers=supervisor_headers,
+                )
                 assert resume_resp.status_code == 200
                 resume_data = resume_resp.json()
                 assert resume_data["status"] == "success"
                 assert "Full refund issued" in resume_data["response"]
 
                 # 3. Verify calling resume again on now completed thread returns 400
-                repeat_resume = await client.post("/api/chat/resume", json={
-                    "thread_id": thread_id,
-                    "response": "Another override attempt."
-                })
+                repeat_resume = await client.post(
+                    "/api/chat/resume",
+                    json={
+                        "thread_id": thread_id,
+                        "response": "Another override attempt."
+                    },
+                    headers=supervisor_headers,
+                )
                 assert repeat_resume.status_code == 400
                 assert "not currently paused" in repeat_resume.json()["detail"]
 
