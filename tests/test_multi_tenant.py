@@ -781,3 +781,161 @@ async def test_hitl_supervisor_cross_tenant_resume_blocked():
             assert r_amz.status_code == 200
             assert r_amz.json()["status"] == "success"
             assert "Amazon Supervisor: Refund issued." in r_amz.json()["response"]
+
+
+# =====================================================================
+# 7. Hybrid Grounded Tenant Presets (/api/orgs/presets & Upload Sync)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_org_presets_grounded_per_workspace():
+    """
+    Verifies GET /api/orgs/presets returns distinct, policy-accurate TEST-01..TEST-05
+    presets for nexus, amazon, and flipkart alongside fixed TEST-06..TEST-08 guardrails.
+    """
+    async with _client() as client:
+        r_nexus = await client.get("/api/orgs/presets")
+        assert r_nexus.status_code == 200
+        d_nexus = r_nexus.json()
+        assert d_nexus["org_id"] == "org_nexus"
+        assert len(d_nexus["tenant_presets"]) == 5
+        assert len(d_nexus["guardrail_presets"]) == 3
+        assert [p["code"] for p in d_nexus["guardrail_presets"]] == ["TEST-06", "TEST-07", "TEST-08"]
+        assert "International & Duties" in [p["title"] for p in d_nexus["tenant_presets"]]
+
+        r_amz = await client.get("/api/orgs/presets", headers={"X-Org-Slug": "amazon"})
+        assert r_amz.status_code == 200
+        d_amz = r_amz.json()
+        assert d_amz["org_id"] == "org_amazon"
+        assert len(d_amz["tenant_presets"]) == 5
+        assert len(d_amz["guardrail_presets"]) == 3
+        amz_queries = " ".join(p["query"] for p in d_amz["tenant_presets"])
+        assert "30-day electronics return window" in amz_queries
+        assert "7-day replacement guarantee" not in amz_queries
+        assert any(p["code"] == "TEST-05" and "#7721" in p["query"] for p in d_amz["tenant_presets"])
+
+        r_fkt = await client.get("/api/orgs/presets", headers={"X-Org-Slug": "flipkart"})
+        assert r_fkt.status_code == 200
+        d_fkt = r_fkt.json()
+        assert d_fkt["org_id"] == "org_flipkart"
+        assert len(d_fkt["tenant_presets"]) == 5
+        assert len(d_fkt["guardrail_presets"]) == 3
+        fkt_queries = " ".join(p["query"] for p in d_fkt["tenant_presets"])
+        assert "7-day replacement guarantee" in fkt_queries
+        assert "30-day electronics return window" not in fkt_queries
+        assert any(p["code"] == "TEST-05" and "#7721" in p["query"] for p in d_fkt["tenant_presets"])
+
+
+@pytest.mark.asyncio
+async def test_new_org_empty_presets_then_populated_on_upload(isolated_multi_tenant_env: Path):
+    """
+    Verifies a newly registered org starts with 0 tenant_presets + 3 guardrail_presets,
+    and gains sequential TEST-01.. presets immediately after its supervisor uploads a document or CSV.
+    """
+    async with _client() as client:
+        reg_resp = await client.post(
+            "/api/orgs/register",
+            json={
+                "org_name": "Zeta Cloud",
+                "org_slug": "zeta",
+                "supervisor_name": "Zeta Admin",
+                "supervisor_email": "admin@zeta.demo",
+                "password": "Password@2026!",
+            },
+            headers={"X-Forwarded-For": "203.0.113.88"},
+        )
+        assert reg_resp.status_code == 200
+        zeta_token = reg_resp.json()["access_token"]
+
+        # Initially: 0 tenant presets, 3 fixed guardrails
+        initial_presets = await client.get(
+            "/api/orgs/presets",
+            headers={"X-Org-Slug": "zeta"},
+        )
+        assert initial_presets.status_code == 200
+        initial_data = initial_presets.json()
+        assert initial_data["org_id"] == "org_zeta"
+        assert initial_data["tenant_presets"] == []
+        assert [p["code"] for p in initial_data["guardrail_presets"]] == ["TEST-06", "TEST-07", "TEST-08"]
+
+        # Supervisor uploads a .txt policy document
+        mock_txt_result = {
+            "status": "success",
+            "filename": "zeta_sla.txt",
+            "file_type": ".txt",
+            "chunks_indexed": 2,
+            "tables_created": [],
+            "suggested_prompts": [
+                "What is Zeta Cloud's 99.99% uptime SLA guarantee?",
+                "How do enterprise customers file a Zeta SLA credit claim?",
+            ],
+            "message": "Indexed",
+        }
+        uploaded_txt = Path("data/uploads/org_zeta/zeta_sla.txt")
+        try:
+            with patch("server.process_uploaded_file", return_value=mock_txt_result):
+                up_resp = await client.post(
+                    "/api/ingest/upload",
+                    files={"file": ("zeta_sla.txt", io.BytesIO(b"Zeta SLA 99.99%"), "text/plain")},
+                    headers={"Authorization": f"Bearer {zeta_token}"},
+                )
+                assert up_resp.status_code == 200
+        finally:
+            if uploaded_txt.exists():
+                uploaded_txt.unlink()
+
+        after_txt = await client.get(
+            "/api/orgs/presets",
+            headers={"Authorization": f"Bearer {zeta_token}"},
+        )
+        assert after_txt.status_code == 200
+        after_txt_data = after_txt.json()
+        assert len(after_txt_data["tenant_presets"]) == 2
+        assert [p["code"] for p in after_txt_data["tenant_presets"]] == ["TEST-01", "TEST-02"]
+        assert "99.99% uptime SLA" in after_txt_data["tenant_presets"][0]["query"]
+        assert after_txt_data["tenant_presets"][0]["source"] == "zeta_sla.txt"
+
+        # Supervisor uploads a .csv dataset -> appends TEST-03, TEST-04
+        mock_csv_result = {
+            "status": "success",
+            "filename": "zeta_tiers.csv",
+            "file_type": ".csv",
+            "chunks_indexed": 1,
+            "tables_created": ["upload_org_zeta_zeta_tiers"],
+            "suggested_prompts": [
+                "Show all Zeta Cloud pricing tiers in upload_org_zeta_zeta_tiers.",
+                "What support response times are listed in Zeta Tiers?",
+            ],
+            "message": "Indexed",
+        }
+        uploaded_csv = Path("data/uploads/org_zeta/zeta_tiers.csv")
+        try:
+            with patch("server.process_uploaded_file", return_value=mock_csv_result):
+                csv_resp = await client.post(
+                    "/api/ingest/upload",
+                    files={"file": ("zeta_tiers.csv", io.BytesIO(b"tier,price\nPro,99\n"), "text/csv")},
+                    headers={"Authorization": f"Bearer {zeta_token}"},
+                )
+                assert csv_resp.status_code == 200
+        finally:
+            if uploaded_csv.exists():
+                uploaded_csv.unlink()
+
+        after_csv = await client.get("/api/orgs/presets", headers={"X-Org-Slug": "zeta"})
+        assert after_csv.status_code == 200
+        after_csv_data = after_csv.json()
+        assert len(after_csv_data["tenant_presets"]) == 4
+        assert [p["code"] for p in after_csv_data["tenant_presets"]] == [
+            "TEST-01",
+            "TEST-02",
+            "TEST-03",
+            "TEST-04",
+        ]
+        assert after_csv_data["tenant_presets"][2]["category"] == "SQLITE TOOL"
+        assert len(after_csv_data["guardrail_presets"]) == 3
+
+        # Other orgs remain completely isolated
+        amz_check = await client.get("/api/orgs/presets", headers={"X-Org-Slug": "amazon"})
+        assert all(p["source"] != "zeta_sla.txt" for p in amz_check.json()["tenant_presets"])
+

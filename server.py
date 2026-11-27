@@ -44,6 +44,7 @@ from utils.auth import (
     create_user,
     get_escalated_thread_org_id,
     get_optional_user,
+    get_org_presets,
     get_organization_by_slug,
     get_tenant_context,
     init_auth_db,
@@ -58,6 +59,7 @@ from utils.auth import (
     require_supervisor,
     revoke_refresh_session,
     rotate_refresh_session,
+    save_uploaded_tenant_presets,
     seed_demo_users,
     set_refresh_cookie,
 )
@@ -133,6 +135,24 @@ class OrganizationPublic(BaseModel):
     org_id: str
     name: str
     slug: str
+
+
+class PresetItem(BaseModel):
+    id: str
+    org_id: str
+    code: str
+    title: str
+    category: str
+    query: str
+    tech_tag: str
+    source: Optional[str] = None
+    created_at: str
+
+
+class OrgPresetsResponse(BaseModel):
+    org_id: str
+    tenant_presets: List[PresetItem]
+    guardrail_presets: List[PresetItem]
 
 
 class UserPublic(BaseModel):
@@ -369,6 +389,16 @@ async def get_orgs():
     """Returns all available multi-tenant organization workspaces."""
     orgs = await asyncio.to_thread(list_organizations)
     return [OrganizationPublic(**o) for o in orgs]
+
+
+@server.get("/api/orgs/presets", response_model=OrgPresetsResponse)
+async def get_organization_presets(tenant: Dict[str, str] = Depends(get_tenant_context)):
+    """
+    Returns grounded domain presets (`TEST-01`..`TEST-05`) for the active organization
+    alongside the 3 fixed platform guardrail presets (`TEST-06`..`TEST-08`).
+    """
+    data = await asyncio.to_thread(get_org_presets, tenant["org_id"])
+    return OrgPresetsResponse(**data)
 
 
 @server.post("/api/orgs/register", response_model=AuthResponse, dependencies=[Depends(rate_limit_org_register)])
@@ -1036,7 +1066,19 @@ async def upload_knowledge_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error indexing file '{safe_filename}': {e}")
 
-    # 3. Invalidate semantic cache entries for this organization (`semcache:{org_id}:*`)
+    # 3. Persist generated sample questions as workspace presets (TEST-01..TEST-05)
+    try:
+        await asyncio.to_thread(
+            save_uploaded_tenant_presets,
+            org_id,
+            safe_filename,
+            result.get("suggested_prompts") or [],
+            result.get("tables_created") or [],
+        )
+    except Exception:
+        pass
+
+    # 4. Invalidate semantic cache entries for this organization (`semcache:{org_id}:*`)
     await get_semantic_cache().invalidate_org(org_id)
     return UploadResponse(**result)
 

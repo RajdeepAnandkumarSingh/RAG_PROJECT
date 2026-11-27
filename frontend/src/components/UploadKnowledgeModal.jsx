@@ -27,7 +27,7 @@ export default function UploadKnowledgeModal({
   onSelectFile,
   onOpenAuthModal,
 }) {
-  const { user, isSupervisor, loginAsDemo } = useAuth();
+  const { user, isSupervisor, loginAsDemo, activeOrg, refreshPresets } = useAuth();
   const [isDragging, setIsDragging] = useState(false);
   const [demoSigningIn, setDemoSigningIn] = useState(false);
   const [authError, setAuthError] = useState('');
@@ -75,25 +75,33 @@ export default function UploadKnowledgeModal({
     }
   };
 
-  const handleFileChange = (e) => {
-    if (!isSupervisor) return;
-    const file = e.target.files?.[0];
-    if (file && onSelectFile) {
-      onSelectFile(file);
-    }
-    if (modalFileInputRef.current) {
-      modalFileInputRef.current.value = '';
+  const triggerUpload = async (file) => {
+    if (!file || !onSelectFile) return;
+    const ok = await onSelectFile(file);
+    if (ok) {
+      await refreshPresets(activeOrg?.slug);
     }
   };
 
-  const handleDrop = (e) => {
+  const handleFileChange = async (e) => {
+    if (!isSupervisor) return;
+    const file = e.target.files?.[0];
+    if (modalFileInputRef.current) {
+      modalFileInputRef.current.value = '';
+    }
+    if (file) {
+      await triggerUpload(file);
+    }
+  };
+
+  const handleDrop = async (e) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
     if (uploading || !isSupervisor) return;
     const file = e.dataTransfer?.files?.[0];
-    if (file && onSelectFile) {
-      onSelectFile(file);
+    if (file) {
+      await triggerUpload(file);
     }
   };
 
@@ -175,7 +183,7 @@ export default function UploadKnowledgeModal({
                       isDark ? 'text-slate-400' : 'text-slate-600'
                     }`}
                   >
-                    Index documents into ChromaDB + BM25 or tables into SQLite.
+                    Index into <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{activeOrg?.name || 'Nexus Enterprise'}</strong> (ChromaDB + BM25 or SQLite).
                   </p>
                 </div>
               </div>
