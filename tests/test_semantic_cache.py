@@ -190,7 +190,7 @@ def test_semantic_cache_set_with_ttl():
                 mock_redis.set.assert_called_once()
                 call_args, call_kwargs = mock_redis.set.call_args
                 key_name = call_args[0]
-                assert key_name.startswith("nexus:cache:")
+                assert key_name.startswith("semcache:org_nexus:")
                 assert call_kwargs["ex"] == 7200
                 payload = json.loads(call_args[1])
                 assert payload["query"] == "What is the warranty period?"

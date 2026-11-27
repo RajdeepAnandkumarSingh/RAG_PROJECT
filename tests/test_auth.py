@@ -523,9 +523,9 @@ async def test_rbac_upload_and_resume_enforcement():
                 assert r_sup_upload.status_code == 200
                 assert r_sup_upload.json()["status"] == "success"
         finally:
-            uploaded = Path("data/uploads/policy.txt")
-            if uploaded.exists():
-                uploaded.unlink()
+            for uploaded in (Path("data/uploads/policy.txt"), Path("data/uploads/org_nexus/policy.txt")):
+                if uploaded.exists():
+                    uploaded.unlink()
 
         mock_snapshot = MagicMock()
         mock_snapshot.next = ("human_review_node",)

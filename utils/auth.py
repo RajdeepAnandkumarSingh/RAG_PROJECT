@@ -2,6 +2,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -9,7 +10,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import jwt
 from fastapi import HTTPException, Request, Response, Security, status
@@ -34,20 +35,45 @@ REFRESH_COOKIE_NAME = "nexus_refresh_token"
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
 
+DEFAULT_ORG_ID = "org_nexus"
+DEFAULT_ORG_SLUG = "nexus"
+DEFAULT_ORG_NAME = "Nexus Enterprise"
+
+DEFAULT_ORGANIZATIONS = (
+    {
+        "org_id": "org_nexus",
+        "name": "Nexus Enterprise",
+        "slug": "nexus",
+    },
+    {
+        "org_id": "org_amazon",
+        "name": "Amazon Support",
+        "slug": "amazon",
+    },
+    {
+        "org_id": "org_flipkart",
+        "name": "Flipkart Support",
+        "slug": "flipkart",
+    },
+)
+
 RATE_LIMITS: Dict[str, Tuple[int, int]] = {
     "login": (5, 60),
     "signup": (3, 3600),
     "refresh": (20, 60),
+    "org_register": (3, 3600),
 }
 
 DEMO_USERS = (
     {
+        "org_id": "org_nexus",
         "email": "user@nexusrag.ai",
         "password": "DemoUser@2026!",
         "role": "user",
         "full_name": "Alex Rivera (Analyst)",
     },
     {
+        "org_id": "org_nexus",
         "email": "supervisor@nexusrag.ai",
         "password": "Supervisor@2026!",
         "role": "supervisor",
@@ -55,11 +81,50 @@ DEMO_USERS = (
     },
 )
 
+TENANT_DEMO_USERS = (
+    {
+        "org_id": "org_amazon",
+        "email": "customer@amazon.demo",
+        "password": "DemoUser@2026!",
+        "role": "user",
+        "full_name": "Amazon Customer (Demo)",
+    },
+    {
+        "org_id": "org_amazon",
+        "email": "supervisor@amazon.demo",
+        "password": "Supervisor@2026!",
+        "role": "supervisor",
+        "full_name": "Amazon Supervisor (Demo)",
+    },
+    {
+        "org_id": "org_flipkart",
+        "email": "customer@flipkart.demo",
+        "password": "DemoUser@2026!",
+        "role": "user",
+        "full_name": "Flipkart Customer (Demo)",
+    },
+    {
+        "org_id": "org_flipkart",
+        "email": "supervisor@flipkart.demo",
+        "password": "Supervisor@2026!",
+        "role": "supervisor",
+        "full_name": "Flipkart Supervisor (Demo)",
+    },
+)
+
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class UserAlreadyExistsError(Exception):
-    """Raised when attempting to register an already existing email."""
+    """Raised when attempting to register an already existing email within an organization."""
+
+
+class OrgAlreadyExistsError(Exception):
+    """Raised when attempting to register an organization with a duplicate slug or org_id."""
+
+
+class OrgNotFoundError(Exception):
+    """Raised when an organization slug or org_id cannot be resolved."""
 
 
 class InvalidCredentialsError(Exception):
@@ -124,25 +189,103 @@ def _connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     return conn
 
 
+def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> List[str]:
+    rows = cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return [row[1] for row in rows]
+
+
+def _seed_default_organizations(cursor: sqlite3.Cursor, now_iso: str) -> None:
+    for org in DEFAULT_ORGANIZATIONS:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO organizations (org_id, name, slug, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (org["org_id"], org["name"], org["slug"], now_iso),
+        )
+
+
 def init_auth_db(db_path: Optional[str] = None) -> None:
-    """Idempotently creates auth and session tables inside SQLite."""
+    """Idempotently creates and migrates multi-tenant auth and organization tables inside SQLite."""
     conn = _connect(db_path)
     try:
         cursor = conn.cursor()
+        now_iso = _utc_now().isoformat()
+
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                full_name TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                failed_attempts INTEGER NOT NULL DEFAULT 0,
-                locked_until TEXT,
+            CREATE TABLE IF NOT EXISTS organizations (
+                org_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
         )
+        _seed_default_organizations(cursor, now_iso)
+
+        # Create or migrate users table to include org_id and UNIQUE(org_id, email)
+        cursor.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+        )
+        users_ddl_row = cursor.fetchone()
+        if users_ddl_row is None:
+            cursor.execute(
+                """
+                CREATE TABLE users (
+                    id TEXT PRIMARY KEY,
+                    org_id TEXT NOT NULL DEFAULT 'org_nexus',
+                    email TEXT NOT NULL,
+                    full_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    locked_until TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(org_id, email)
+                )
+                """
+            )
+        else:
+            existing_cols = _table_columns(cursor, "users")
+            ddl_norm = re.sub(r"\s+", " ", (users_ddl_row[0] or "").lower())
+            needs_migration = (
+                "org_id" not in existing_cols
+                or "unique(org_id, email)" not in ddl_norm
+            )
+            if needs_migration:
+                org_expr = "COALESCE(org_id, 'org_nexus')" if "org_id" in existing_cols else "'org_nexus'"
+                cursor.execute(
+                    """
+                    CREATE TABLE users_migrated (
+                        id TEXT PRIMARY KEY,
+                        org_id TEXT NOT NULL DEFAULT 'org_nexus',
+                        email TEXT NOT NULL,
+                        full_name TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'user',
+                        failed_attempts INTEGER NOT NULL DEFAULT 0,
+                        locked_until TEXT,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(org_id, email)
+                    )
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    INSERT INTO users_migrated (
+                        id, org_id, email, full_name, password_hash, role,
+                        failed_attempts, locked_until, created_at
+                    )
+                    SELECT
+                        id, {org_expr}, email, full_name, password_hash, role,
+                        failed_attempts, locked_until, created_at
+                    FROM users
+                    """
+                )
+                cursor.execute("DROP TABLE users")
+                cursor.execute("ALTER TABLE users_migrated RENAME TO users")
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS refresh_sessions (
@@ -160,13 +303,36 @@ def init_auth_db(db_path: Optional[str] = None) -> None:
             CREATE TABLE IF NOT EXISTS user_threads (
                 session_id TEXT PRIMARY KEY,
                 user_id TEXT,
+                org_id TEXT NOT NULL DEFAULT 'org_nexus',
                 title TEXT,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        thread_cols = _table_columns(cursor, "user_threads")
+        if "org_id" not in thread_cols:
+            cursor.execute(
+                "ALTER TABLE user_threads ADD COLUMN org_id TEXT NOT NULL DEFAULT 'org_nexus'"
+            )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS escalated_threads (
+                thread_id TEXT PRIMARY KEY,
+                org_id TEXT NOT NULL DEFAULT 'org_nexus',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orgs_slug ON organizations(slug);"
+        )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_org_email ON users(org_id, email);"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_refresh_token_hash ON refresh_sessions(token_hash);"
@@ -174,33 +340,52 @@ def init_auth_db(db_path: Optional[str] = None) -> None:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_user_threads_user_id ON user_threads(user_id);"
         )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_threads_org_id ON user_threads(org_id);"
+        )
         conn.commit()
     finally:
         conn.close()
 
 
-def seed_demo_users(db_path: Optional[str] = None) -> None:
-    """Idempotently inserts pre-seeded Analyst and Supervisor demo accounts."""
+def seed_demo_users(
+    db_path: Optional[str] = None,
+    include_tenants: bool = False,
+) -> None:
+    """
+    Idempotently inserts pre-seeded Analyst and Supervisor demo accounts.
+    By default seeds Nexus Enterprise demo accounts; set include_tenants=True
+    during full ingestion/startup to also seed Amazon & Flipkart demo accounts.
+    """
     init_auth_db(db_path)
+    accounts = list(DEMO_USERS)
+    if include_tenants:
+        accounts.extend(TENANT_DEMO_USERS)
+
     conn = _connect(db_path)
     try:
         cursor = conn.cursor()
         now_iso = _utc_now().isoformat()
-        for account in DEMO_USERS:
+        for account in accounts:
+            org_id = account.get("org_id", DEFAULT_ORG_ID)
             email = account["email"].strip().lower()
-            cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+            cursor.execute(
+                "SELECT id FROM users WHERE org_id = ? AND email = ?",
+                (org_id, email),
+            )
             if cursor.fetchone() is not None:
                 continue
             cursor.execute(
                 """
                 INSERT INTO users (
-                    id, email, full_name, password_hash, role,
+                    id, org_id, email, full_name, password_hash, role,
                     failed_attempts, locked_until, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, 0, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
                 """,
                 (
                     uuid.uuid4().hex,
+                    org_id,
                     email,
                     account["full_name"],
                     hash_password(account["password"]),
@@ -213,13 +398,146 @@ def seed_demo_users(db_path: Optional[str] = None) -> None:
         conn.close()
 
 
+def _format_org_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "org_id": row["org_id"],
+        "name": row["name"],
+        "slug": row["slug"],
+    }
+
+
+def list_organizations(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Returns all registered organizations ordered by creation time."""
+    init_auth_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT org_id, name, slug FROM organizations ORDER BY created_at ASC, org_id ASC"
+        ).fetchall()
+        return [_format_org_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_organization_by_slug(
+    slug: str, db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Resolves an organization by its URL slug (or org_id fallback)."""
+    clean_slug = (slug or "").strip().lower()
+    if not clean_slug:
+        return None
+    init_auth_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT org_id, name, slug FROM organizations WHERE LOWER(slug) = ? OR org_id = ?",
+            (clean_slug, clean_slug),
+        ).fetchone()
+        return _format_org_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_organization_by_id(
+    org_id: str, db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Resolves an organization by org_id."""
+    clean_id = (org_id or "").strip()
+    if not clean_id:
+        return None
+    init_auth_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT org_id, name, slug FROM organizations WHERE org_id = ?",
+            (clean_id,),
+        ).fetchone()
+        return _format_org_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def create_organization(
+    name: str,
+    slug: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Creates a new organization workspace, raising OrgAlreadyExistsError on conflict."""
+    init_auth_db(db_path)
+    clean_name = name.strip()
+    clean_slug = re.sub(r"[^a-z0-9-]", "-", slug.strip().lower()).strip("-")
+    if not clean_slug:
+        raise ValueError("Invalid organization slug.")
+    org_id = f"org_{clean_slug.replace('-', '_')}"
+    now_iso = _utc_now().isoformat()
+
+    conn = _connect(db_path)
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO organizations (org_id, name, slug, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (org_id, clean_name, clean_slug, now_iso),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise OrgAlreadyExistsError(
+                f"An organization with slug '{clean_slug}' already exists."
+            ) from exc
+    finally:
+        conn.close()
+
+    return {"org_id": org_id, "name": clean_name, "slug": clean_slug}
+
+
+def register_organization(
+    org_name: str,
+    org_slug: str,
+    supervisor_name: str,
+    supervisor_email: str,
+    password: str,
+    db_path: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Creates a new organization and its initial supervisor account atomically."""
+    org = create_organization(org_name, org_slug, db_path=db_path)
+    try:
+        supervisor = create_user(
+            email=supervisor_email,
+            full_name=supervisor_name,
+            password=password,
+            role="supervisor",
+            db_path=db_path,
+            org_id=org["org_id"],
+        )
+    except Exception:
+        # Clean up newly created organization if user creation fails
+        conn = _connect(db_path)
+        try:
+            conn.execute("DELETE FROM organizations WHERE org_id = ?", (org["org_id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        raise
+    return org, supervisor
+
+
 def _format_user_row(row: sqlite3.Row) -> Dict[str, Any]:
+    keys = row.keys()
+    org_id = row["org_id"] if "org_id" in keys and row["org_id"] else DEFAULT_ORG_ID
+    org_slug = row["org_slug"] if "org_slug" in keys and row["org_slug"] else (
+        org_id.removeprefix("org_").replace("_", "-") if org_id != DEFAULT_ORG_ID else DEFAULT_ORG_SLUG
+    )
     return {
         "id": row["id"],
         "email": row["email"],
         "full_name": row["full_name"],
         "name": row["full_name"],
         "role": row["role"],
+        "org_id": org_id,
+        "org_slug": org_slug,
     }
 
 
@@ -229,11 +547,13 @@ def create_user(
     password: str,
     role: str = "user",
     db_path: Optional[str] = None,
+    org_id: str = DEFAULT_ORG_ID,
 ) -> Dict[str, Any]:
-    """Creates a new user in SQLite, raising UserAlreadyExistsError on duplicate email."""
+    """Creates a new user within an organization in SQLite, raising UserAlreadyExistsError on duplicate (org_id, email)."""
     init_auth_db(db_path)
     normalized_email = email.strip().lower()
     clean_name = full_name.strip()
+    resolved_org_id = (org_id or DEFAULT_ORG_ID).strip()
     user_id = uuid.uuid4().hex
     now_iso = _utc_now().isoformat()
     password_hash = hash_password(password)
@@ -241,20 +561,28 @@ def create_user(
     conn = _connect(db_path)
     try:
         cursor = conn.cursor()
+        org_row = cursor.execute(
+            "SELECT org_id, slug FROM organizations WHERE org_id = ?",
+            (resolved_org_id,),
+        ).fetchone()
+        if org_row is None:
+            raise OrgNotFoundError(f"Organization '{resolved_org_id}' not found.")
+        org_slug = org_row["slug"]
+
         try:
             cursor.execute(
                 """
                 INSERT INTO users (
-                    id, email, full_name, password_hash, role,
+                    id, org_id, email, full_name, password_hash, role,
                     failed_attempts, locked_until, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, 0, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
                 """,
-                (user_id, normalized_email, clean_name, password_hash, role, now_iso),
+                (user_id, resolved_org_id, normalized_email, clean_name, password_hash, role, now_iso),
             )
             conn.commit()
         except sqlite3.IntegrityError as exc:
-            raise UserAlreadyExistsError("An account with this email already exists.") from exc
+            raise UserAlreadyExistsError("An account with this email already exists in this organization.") from exc
     finally:
         conn.close()
 
@@ -264,6 +592,8 @@ def create_user(
         "full_name": clean_name,
         "name": clean_name,
         "role": role,
+        "org_id": resolved_org_id,
+        "org_slug": org_slug,
     }
 
 
@@ -271,10 +601,11 @@ def authenticate_user(
     email: str,
     password: str,
     db_path: Optional[str] = None,
+    org_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Validates user credentials, enforces 5-failure / 15-minute lockout,
-    and returns sanitized user dict or raises InvalidCredentialsError / AccountLockedError.
+    Validates user credentials within an organization (or unique email lookup if org_id is omitted),
+    enforces 5-failure / 15-minute lockout, and returns sanitized user dict.
     """
     init_auth_db(db_path)
     normalized_email = email.strip().lower()
@@ -283,8 +614,37 @@ def authenticate_user(
     conn = _connect(db_path)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = ?", (normalized_email,))
-        row = cursor.fetchone()
+        if org_id:
+            cursor.execute(
+                """
+                SELECT u.*, o.slug AS org_slug
+                FROM users u
+                LEFT JOIN organizations o ON u.org_id = o.org_id
+                WHERE u.org_id = ? AND u.email = ?
+                """,
+                (org_id, normalized_email),
+            )
+            row = cursor.fetchone()
+        else:
+            cursor.execute(
+                """
+                SELECT u.*, o.slug AS org_slug
+                FROM users u
+                LEFT JOIN organizations o ON u.org_id = o.org_id
+                WHERE u.email = ?
+                """,
+                (normalized_email,),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                row = None
+            elif len(rows) == 1:
+                row = rows[0]
+            else:
+                # Prefer default org if email exists across multiple organizations and no org was specified
+                nexus_rows = [r for r in rows if r["org_id"] == DEFAULT_ORG_ID]
+                row = nexus_rows[0] if nexus_rows else rows[0]
+
         if row is None:
             raise InvalidCredentialsError("Invalid email or password")
 
@@ -390,7 +750,15 @@ def rotate_refresh_session(
             conn.commit()
             raise InvalidRefreshTokenError("Refresh token expired.")
 
-        cursor.execute("SELECT * FROM users WHERE id = ?", (session_row["user_id"],))
+        cursor.execute(
+            """
+            SELECT u.*, o.slug AS org_slug
+            FROM users u
+            LEFT JOIN organizations o ON u.org_id = o.org_id
+            WHERE u.id = ?
+            """,
+            (session_row["user_id"],),
+        )
         user_row = cursor.fetchone()
         if user_row is None:
             raise InvalidRefreshTokenError("User no longer exists.")
@@ -437,27 +805,77 @@ def record_user_thread(
     user_id: Optional[str],
     title: Optional[str] = None,
     db_path: Optional[str] = None,
+    org_id: str = DEFAULT_ORG_ID,
 ) -> None:
-    """Associates a chat thread session_id with an authenticated user_id."""
+    """Associates a chat thread session_id with an authenticated user_id and org_id."""
     if not session_id or not user_id:
         return
     init_auth_db(db_path)
     now_iso = _utc_now().isoformat()
     clean_title = title.strip()[:120] if title else None
+    resolved_org_id = (org_id or DEFAULT_ORG_ID).strip()
     conn = _connect(db_path)
     try:
         conn.execute(
             """
-            INSERT INTO user_threads (session_id, user_id, title, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO user_threads (session_id, user_id, org_id, title, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 user_id = COALESCE(user_threads.user_id, excluded.user_id),
+                org_id = COALESCE(user_threads.org_id, excluded.org_id),
                 title = COALESCE(user_threads.title, excluded.title),
                 updated_at = excluded.updated_at
             """,
-            (session_id, user_id, clean_title, now_iso),
+            (session_id, user_id, resolved_org_id, clean_title, now_iso),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def record_escalated_thread(
+    thread_id: str,
+    org_id: str = DEFAULT_ORG_ID,
+    db_path: Optional[str] = None,
+) -> None:
+    """Persists org_id ownership for an escalated HITL thread."""
+    if not thread_id:
+        return
+    init_auth_db(db_path)
+    now_iso = _utc_now().isoformat()
+    resolved_org_id = (org_id or DEFAULT_ORG_ID).strip()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO escalated_threads (thread_id, org_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                org_id = excluded.org_id,
+                updated_at = excluded.updated_at
+            """,
+            (thread_id, resolved_org_id, now_iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_escalated_thread_org_id(
+    thread_id: str,
+    db_path: Optional[str] = None,
+) -> Optional[str]:
+    """Retrieves the owning org_id for an escalated HITL thread if recorded."""
+    if not thread_id:
+        return None
+    init_auth_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT org_id FROM escalated_threads WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        return row["org_id"] if row else None
     finally:
         conn.close()
 
@@ -466,14 +884,20 @@ def create_access_token(
     user: Dict[str, Any],
     expires_delta: Optional[timedelta] = None,
 ) -> str:
-    """Creates a 15-minute HS256 JWT access token."""
+    """Creates a 15-minute HS256 JWT access token with tenant org_id and org_slug claims."""
     now = _utc_now()
     expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    org_id = user.get("org_id") or DEFAULT_ORG_ID
+    org_slug = user.get("org_slug") or (
+        org_id.removeprefix("org_").replace("_", "-") if org_id != DEFAULT_ORG_ID else DEFAULT_ORG_SLUG
+    )
     payload = {
         "sub": user["id"],
         "email": user["email"],
         "role": user["role"],
         "name": user.get("name") or user.get("full_name", ""),
+        "org_id": org_id,
+        "org_slug": org_slug,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -487,6 +911,10 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     email = payload.get("email")
     role = payload.get("role")
     name = payload.get("name", "")
+    org_id = payload.get("org_id") or DEFAULT_ORG_ID
+    org_slug = payload.get("org_slug") or (
+        org_id.removeprefix("org_").replace("_", "-") if org_id != DEFAULT_ORG_ID else DEFAULT_ORG_SLUG
+    )
     if not user_id or not email or not role:
         raise jwt.InvalidTokenError("Token missing required claims.")
     return {
@@ -495,6 +923,8 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         "role": role,
         "name": name,
         "full_name": name,
+        "org_id": org_id,
+        "org_slug": org_slug,
     }
 
 
@@ -645,6 +1075,10 @@ async def rate_limit_refresh(request: Request) -> None:
     await rate_limiter.check(request, "refresh")
 
 
+async def rate_limit_org_register(request: Request) -> None:
+    await rate_limiter.check(request, "org_register")
+
+
 async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
 ) -> Optional[Dict[str, Any]]:
@@ -658,6 +1092,39 @@ async def get_optional_user(
         return decode_access_token(credentials.credentials)
     except Exception:
         return None
+
+
+async def get_tenant_context(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+) -> Dict[str, str]:
+    """
+    Resolves tenant context (org_id, org_slug):
+    - From the verified JWT if authenticated (authoritative, prevents header spoofing).
+    - From the X-Org-Slug request header in Guest Mode.
+    - Defaults to ('org_nexus', 'nexus') when omitted for backward compatibility.
+    """
+    if credentials is not None and credentials.credentials:
+        try:
+            user = decode_access_token(credentials.credentials)
+            return {
+                "org_id": user.get("org_id") or DEFAULT_ORG_ID,
+                "org_slug": user.get("org_slug") or DEFAULT_ORG_SLUG,
+            }
+        except Exception:
+            pass
+
+    header_slug = (request.headers.get("x-org-slug") or "").strip().lower()
+    if not header_slug:
+        return {"org_id": DEFAULT_ORG_ID, "org_slug": DEFAULT_ORG_SLUG}
+
+    org = get_organization_by_slug(header_slug)
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Organization '{header_slug}' not found.",
+        )
+    return {"org_id": org["org_id"], "org_slug": org["slug"]}
 
 
 async def require_supervisor(

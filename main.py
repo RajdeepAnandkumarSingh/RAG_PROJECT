@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from typing import Annotated, TypedDict, List, Optional
+from typing import Annotated, TypedDict, List, Optional, Dict, NotRequired
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
@@ -15,12 +15,13 @@ from config import settings
 from schemas.routing import RouteDecision
 from schemas.grading import GradeResult, QueryRewriteResult
 from utils.pii_scrubber import redact_pii
-from utils.hybrid_retriever import HybridRetriever
+from utils.hybrid_retriever import HybridRetriever, get_bm25_path
 from utils.order_db import get_order_by_id, init_orders_table
 from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 
-# 1. Define Agent State with CRAG and HITL Fields
+# 1. Define Agent State with Multi-Tenant org_id, CRAG, and HITL Fields
 class AgentState(TypedDict):
+    org_id: NotRequired[str]
     user_query: str
     query: str
     masked_query: str
@@ -51,31 +52,44 @@ def get_vector_db():
         )
     return _vector_db
 
-# Lazy Hybrid Retriever Singleton
-_hybrid_retriever = None
+# Lazy Per-Organization Hybrid Retriever Registry
+_hybrid_retrievers: Dict[str, HybridRetriever] = {}
 
-def get_hybrid_retriever() -> HybridRetriever:
-    global _hybrid_retriever
+def get_hybrid_retriever(org_id: str = "org_nexus") -> HybridRetriever:
+    resolved_org = (org_id or "org_nexus").strip() or "org_nexus"
     current_db = get_vector_db()
-    if _hybrid_retriever is None:
-        _hybrid_retriever = HybridRetriever(
+    if resolved_org not in _hybrid_retrievers:
+        _hybrid_retrievers[resolved_org] = HybridRetriever(
             chroma_db=current_db,
             chroma_path=settings.CHROMA_PERSIST_DIRECTORY,
             collection_name=settings.CHROMA_COLLECTION_NAME,
-            bm25_path=settings.BM25_INDEX_PATH,
-            reranker_model=settings.RERANKER_MODEL
+            bm25_path=get_bm25_path(resolved_org),
+            reranker_model=settings.RERANKER_MODEL,
+            org_id=resolved_org,
         )
     else:
-        _hybrid_retriever.chroma_db = current_db
-    return _hybrid_retriever
+        _hybrid_retrievers[resolved_org].chroma_db = current_db
+    return _hybrid_retrievers[resolved_org]
 
-def reload_retriever_indices() -> HybridRetriever:
-    """Hot-reloads the global HybridRetriever BM25 index and vector DB reference."""
+def reload_retriever_indices(org_id: Optional[str] = None) -> HybridRetriever:
+    """Hot-reloads the HybridRetriever BM25 index and vector DB reference."""
     global _vector_db
     _vector_db = None
-    retriever = get_hybrid_retriever()
-    retriever.reload_index()
-    return retriever
+    if org_id:
+        retriever = get_hybrid_retriever(org_id)
+        retriever.reload_index()
+        return retriever
+
+    if not _hybrid_retrievers:
+        retriever = get_hybrid_retriever("org_nexus")
+        retriever.reload_index()
+        return retriever
+
+    last = None
+    for oid in list(_hybrid_retrievers.keys()):
+        last = get_hybrid_retriever(oid)
+        last.reload_index()
+    return last
 
 # Initialize sample orders table in SQLite at startup (non-fatal if DB not yet created)
 try:
@@ -195,7 +209,10 @@ async def guardrail_and_router_node(state: AgentState) -> dict:
             classification = "safe_rag"
             decision.classification = "safe_rag"
     
+    org_id = (state.get("org_id") or "org_nexus").strip() or "org_nexus"
+
     base_state = {
+        "org_id": org_id,
         "user_query": raw_query,
         "query": raw_query,
         "masked_query": masked_query,
@@ -255,7 +272,8 @@ async def live_order_tool_node(state: AgentState) -> dict:
         }
 
     order_id = match.group(1)
-    order = await get_order_by_id(order_id)
+    org_id = (state.get("org_id") or "org_nexus").strip() or "org_nexus"
+    order = await get_order_by_id(order_id, db_path=settings.SQLITE_DB_PATH, org_id=org_id)
     if not order:
         return {
             "response": f"Order #{order_id} could not be found in our database. Please verify your order number and try again.",
@@ -279,16 +297,17 @@ async def live_order_tool_node(state: AgentState) -> dict:
 
 async def retrieve_node(state: AgentState) -> dict:
     """
-    Retrieves top chunks using async HybridRetriever:
-    - Dense ChromaDB top-15 + Sparse BM25 top-15 concurrently in worker threads.
+    Retrieves top chunks using tenant-isolated async HybridRetriever:
+    - Dense ChromaDB (filter={"org_id": org_id}) top-15 + Sparse BM25 (data/bm25/{org_id}.pkl) top-15 concurrently.
     - Merges with Reciprocal Rank Fusion (k=60).
     - Reranks locally using FlashRank (ms-marco-MiniLM-L-12-v2) to top 4 chunks.
     - Enriches graph state with retrieved_chunks and formatted context.
     """
     query = state.get("masked_query") or state.get("query", "")
-    retriever = get_hybrid_retriever()
-    
-    chunks = await retriever.aretrieve(query)
+    org_id = (state.get("org_id") or "org_nexus").strip() or "org_nexus"
+    retriever = get_hybrid_retriever(org_id=org_id)
+
+    chunks = await retriever.aretrieve(query, org_id=org_id)
     
     context = []
     for c in chunks:
@@ -514,18 +533,22 @@ memory = MemorySaver()
 app = workflow.compile(checkpointer=memory, interrupt_before=["human_review_node"])
 
 # 6. Execution Helpers
-async def aquery_bot(query: str, thread_id: str = "1"):
-    handler = get_langfuse_callback(session_id=thread_id, metadata={"thread_id": thread_id, "source": "main_cli"})
+async def aquery_bot(query: str, thread_id: str = "1", org_id: str = "org_nexus"):
+    resolved_org = (org_id or "org_nexus").strip() or "org_nexus"
+    handler = get_langfuse_callback(
+        session_id=thread_id,
+        metadata={"thread_id": thread_id, "org_id": resolved_org, "source": "main_cli"}
+    )
     callbacks = [handler] if handler else []
     config = {
         "configurable": {"thread_id": thread_id},
         "callbacks": callbacks,
-        "metadata": {"thread_id": thread_id, "session_id": thread_id}
+        "metadata": {"thread_id": thread_id, "session_id": thread_id, "org_id": resolved_org}
     }
     final_state = None
     try:
         async for event in app.astream(
-            {"query": query, "user_query": query},
+            {"query": query, "user_query": query, "org_id": resolved_org},
             config,
             stream_mode="values"
         ):
@@ -539,7 +562,7 @@ async def aquery_bot(query: str, thread_id: str = "1"):
         return "WAITING_FOR_HUMAN"
     return final_state.get("response", "") if final_state else ""
 
-def query_bot(query: str, thread_id: str = "1"):
+def query_bot(query: str, thread_id: str = "1", org_id: str = "org_nexus"):
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -547,9 +570,9 @@ def query_bot(query: str, thread_id: str = "1"):
     if loop and loop.is_running():
         import nest_asyncio
         nest_asyncio.apply()
-        return loop.run_until_complete(aquery_bot(query, thread_id))
+        return loop.run_until_complete(aquery_bot(query, thread_id, org_id=org_id))
     else:
-        return asyncio.run(aquery_bot(query, thread_id))
+        return asyncio.run(aquery_bot(query, thread_id, org_id=org_id))
 
 if __name__ == "__main__":
     print("=== Customer Support RAG Assistant (LangGraph + CRAG + HITL + Hybrid Search + FlashRank) ===")

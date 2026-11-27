@@ -7,7 +7,8 @@ import {
   Layers, Database, Zap, Activity, 
   ChevronRight, Sparkles, MessageSquare,
   UploadCloud, FileText, Globe, RotateCcw, Lock,
-  Sun, Moon, Terminal, LogIn, LogOut
+  Sun, Moon, Terminal, LogIn, LogOut,
+  Building2, ChevronDown, Check, PlusCircle
 } from 'lucide-react';
 import RetrievalInspector from './components/RetrievalInspector';
 import PipelineArchitectureModal from './components/PipelineArchitectureModal';
@@ -179,7 +180,17 @@ const SHOWCASE_PRESETS = [
 ];
 
 function NexusControlPlane() {
-  const { user, authLoading, isSupervisor, authFetch, logout, loginAsDemo } = useAuth();
+  const {
+    user,
+    authLoading,
+    isSupervisor,
+    organizations,
+    activeOrg,
+    switchOrg,
+    authFetch,
+    logout,
+    loginAsDemo,
+  } = useAuth();
 
   const [theme, setTheme] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -202,6 +213,9 @@ function NexusControlPlane() {
   const [authModalTab, setAuthModalTab] = useState("signin");
   const [demoSupervisorBusy, setDemoSupervisorBusy] = useState(false);
   const [latestQuery, setLatestQuery] = useState("");
+  const [orgMenuOpen, setOrgMenuOpen] = useState(false);
+  const orgMenuRef = useRef(null);
+  const prevOrgIdRef = useRef(activeOrg?.org_id || 'org_nexus');
 
   // Live Telemetry from /api/telemetry
   const [telemetry, setTelemetry] = useState({
@@ -240,11 +254,13 @@ function NexusControlPlane() {
     }
   }, [theme]);
 
-  // Fetch telemetry benchmarks on load
+  // Fetch telemetry benchmarks scoped to active organization
   useEffect(() => {
     const fetchTelemetry = async () => {
       try {
-        const resp = await axios.get(`${API_BASE_URL}/api/telemetry`);
+        const resp = await axios.get(`${API_BASE_URL}/api/telemetry`, {
+          headers: activeOrg?.slug ? { 'X-Org-Slug': activeOrg.slug } : undefined,
+        });
         if (resp.data) {
           setTelemetry(resp.data);
         }
@@ -253,7 +269,36 @@ function NexusControlPlane() {
       }
     };
     fetchTelemetry();
-  }, []);
+  }, [activeOrg?.slug]);
+
+  // Reset conversation & inspector state whenever active organization changes
+  useEffect(() => {
+    const nextOrgId = activeOrg?.org_id || 'org_nexus';
+    if (prevOrgIdRef.current !== nextOrgId) {
+      prevOrgIdRef.current = nextOrgId;
+      const freshThread = "session_" + Math.random().toString(36).substring(2, 9);
+      setThreadId(freshThread);
+      setMessages([]);
+      setRetrievedChunks([]);
+      setIntent("");
+      setLatestQuery("");
+      setCustomPrompts([]);
+      setUploadStatus(null);
+      setActiveStages(createInitialStages(freshThread));
+    }
+  }, [activeOrg?.org_id]);
+
+  // Close workspace dropdown on outside click
+  useEffect(() => {
+    if (!orgMenuOpen) return;
+    const handleOutside = (e) => {
+      if (orgMenuRef.current && !orgMenuRef.current.contains(e.target)) {
+        setOrgMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handleOutside);
+    return () => window.removeEventListener('mousedown', handleOutside);
+  }, [orgMenuOpen]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -269,6 +314,17 @@ function NexusControlPlane() {
     setAuthModalBanner(banner);
     setAuthModalTab(tab);
     setShowAuthModal(true);
+  };
+
+  const handleWorkspaceSelect = async (org) => {
+    setOrgMenuOpen(false);
+    if (!org || org.org_id === activeOrg?.org_id || loading) return;
+    await switchOrg(org);
+  };
+
+  const handleNewOrganizationClick = () => {
+    setOrgMenuOpen(false);
+    openAuthModal("", "register_org");
   };
 
   const handleInlineDemoSupervisor = async () => {
@@ -800,6 +856,117 @@ function NexusControlPlane() {
           
           {/* Action Toolbar */}
           <div className="flex items-center gap-2.5">
+             {/* Multi-Tenant Workspace Switcher */}
+             <div ref={orgMenuRef} className="relative">
+               <button
+                 type="button"
+                 onClick={() => setOrgMenuOpen((prev) => !prev)}
+                 disabled={loading}
+                 title="Switch Organization Workspace or Register New Org"
+                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all border text-xs font-bold disabled:opacity-50 ${
+                   isDark
+                     ? 'bg-[#0B1120] hover:bg-[#141D35] border-accent-emerald/40 text-white shadow-sm shadow-emerald-950/30'
+                     : 'bg-white hover:bg-emerald-50 border-emerald-400 text-slate-900 shadow-xs'
+                 }`}
+               >
+                 <Building2 className="w-3.5 h-3.5 text-accent-emerald flex-shrink-0" />
+                 <span className="max-w-[140px] truncate">{activeOrg?.name || 'Nexus Enterprise'}</span>
+                 <span
+                   className={`hidden md:inline-block px-1.5 py-0.5 rounded text-[9px] font-mono uppercase border ${
+                     isDark
+                       ? 'bg-accent-emerald/15 text-emerald-300 border-accent-emerald/30'
+                       : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                   }`}
+                 >
+                   {activeOrg?.slug || 'nexus'}
+                 </span>
+                 <ChevronDown
+                   className={`w-3.5 h-3.5 transition-transform ${
+                     orgMenuOpen ? 'rotate-180' : ''
+                   } ${isDark ? 'text-slate-400' : 'text-slate-600'}`}
+                 />
+               </button>
+
+               <AnimatePresence>
+                 {orgMenuOpen && (
+                   <motion.div
+                     initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                     animate={{ opacity: 1, y: 0, scale: 1 }}
+                     exit={{ opacity: 0, y: 6, scale: 0.97 }}
+                     transition={{ duration: 0.15 }}
+                     className={`absolute right-0 mt-2 w-64 rounded-2xl border shadow-2xl overflow-hidden z-50 backdrop-blur-xl ${
+                       isDark
+                         ? 'bg-[#0B1120]/95 border-[#1E293B] text-slate-100'
+                         : 'bg-white/95 border-emerald-200 text-slate-900'
+                     }`}
+                   >
+                     <div
+                       className={`px-3.5 py-2 border-b text-[10px] font-mono font-bold uppercase tracking-wider ${
+                         isDark
+                           ? 'border-[#1E293B] text-slate-400 bg-[#0F1629]/70'
+                           : 'border-emerald-100 text-slate-600 bg-emerald-50/60'
+                       }`}
+                     >
+                       Active Tenant Workspace
+                     </div>
+
+                     <div className="p-1.5 space-y-0.5 max-h-60 overflow-y-auto">
+                       {organizations.map((org) => {
+                         const isSelected = org.org_id === activeOrg?.org_id;
+                         return (
+                           <button
+                             key={org.org_id}
+                             type="button"
+                             onClick={() => handleWorkspaceSelect(org)}
+                             className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-colors text-left ${
+                               isSelected
+                                 ? isDark
+                                   ? 'bg-accent-emerald/20 text-emerald-300 border border-accent-emerald/35'
+                                   : 'bg-emerald-50 text-emerald-900 border border-emerald-300'
+                                 : isDark
+                                 ? 'hover:bg-white/5 text-slate-200 border border-transparent'
+                                 : 'hover:bg-emerald-50/70 text-slate-700 border border-transparent'
+                             }`}
+                           >
+                             <div className="min-w-0">
+                               <div className="truncate">{org.name}</div>
+                               <div
+                                 className={`text-[10px] font-mono ${
+                                   isDark ? 'text-slate-400' : 'text-slate-500'
+                                 }`}
+                               >
+                                 slug: {org.slug}
+                               </div>
+                             </div>
+                             {isSelected && <Check className="w-4 h-4 text-accent-emerald flex-shrink-0" />}
+                           </button>
+                         );
+                       })}
+                     </div>
+
+                     <div
+                       className={`p-1.5 border-t ${
+                         isDark ? 'border-[#1E293B] bg-[#0F1629]/50' : 'border-emerald-100 bg-emerald-50/40'
+                       }`}
+                     >
+                       <button
+                         type="button"
+                         onClick={handleNewOrganizationClick}
+                         className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
+                           isDark
+                             ? 'text-accent-cyan hover:bg-accent-cyan/10'
+                             : 'text-emerald-700 hover:bg-emerald-100/70'
+                         }`}
+                       >
+                         <PlusCircle className="w-4 h-4 flex-shrink-0" />
+                         <span>+ New Organization</span>
+                       </button>
+                     </div>
+                   </motion.div>
+                 )}
+               </AnimatePresence>
+             </div>
+
              {/* Upload Status Badge */}
              <AnimatePresence>
                {uploadStatus && (

@@ -14,6 +14,60 @@ const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000')
 
 const ACCESS_TOKEN_KEY = 'nexus_rag_access_token';
 const REFRESH_TOKEN_KEY = 'nexus_rag_refresh_token';
+const ACTIVE_ORG_KEY = 'nexus_rag_active_org';
+
+export const DEFAULT_ORG = {
+  org_id: 'org_nexus',
+  name: 'Nexus Enterprise',
+  slug: 'nexus',
+};
+
+const FALLBACK_ORGS = [
+  DEFAULT_ORG,
+  { org_id: 'org_amazon', name: 'Amazon Support', slug: 'amazon' },
+  { org_id: 'org_flipkart', name: 'Flipkart Support', slug: 'flipkart' },
+];
+
+export const ORG_DEMO_ACCOUNTS = {
+  nexus: {
+    user: { email: 'user@nexusrag.ai', password: 'DemoUser@2026!' },
+    supervisor: { email: 'supervisor@nexusrag.ai', password: 'Supervisor@2026!' },
+  },
+  amazon: {
+    user: { email: 'customer@amazon.demo', password: 'DemoUser@2026!' },
+    supervisor: { email: 'supervisor@amazon.demo', password: 'Supervisor@2026!' },
+  },
+  flipkart: {
+    user: { email: 'customer@flipkart.demo', password: 'DemoUser@2026!' },
+    supervisor: { email: 'supervisor@flipkart.demo', password: 'Supervisor@2026!' },
+  },
+};
+
+function readStoredOrg() {
+  const raw = readSessionStorage(ACTIVE_ORG_KEY);
+  if (!raw) return DEFAULT_ORG;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.org_id && parsed?.slug) {
+      return {
+        org_id: parsed.org_id,
+        name: parsed.name || parsed.slug,
+        slug: parsed.slug,
+      };
+    }
+  } catch {
+    // Ignore malformed stored org
+  }
+  return DEFAULT_ORG;
+}
+
+function writeStoredOrg(org) {
+  if (!org?.org_id || !org?.slug) {
+    writeSessionStorage(ACTIVE_ORG_KEY, null);
+    return;
+  }
+  writeSessionStorage(ACTIVE_ORG_KEY, JSON.stringify(org));
+}
 
 const AuthContext = createContext(null);
 
@@ -104,22 +158,67 @@ function isAuthLifecycleEndpoint(resolvedUrl) {
     resolvedUrl.includes('/api/auth/refresh') ||
     resolvedUrl.includes('/api/auth/login') ||
     resolvedUrl.includes('/api/auth/signup') ||
-    resolvedUrl.includes('/api/auth/logout')
+    resolvedUrl.includes('/api/auth/logout') ||
+    resolvedUrl.includes('/api/orgs/register')
   );
 }
 
 export function AuthProvider({ children }) {
   const initialAccess = readSessionStorage(ACCESS_TOKEN_KEY);
   const initialRefresh = readSessionStorage(REFRESH_TOKEN_KEY);
+  const initialOrg = readStoredOrg();
 
   const [user, setUser] = useState(null);
   const [accessToken, setAccessToken] = useState(initialAccess);
   const [refreshToken, setRefreshToken] = useState(initialRefresh);
   const [authLoading, setAuthLoading] = useState(true);
+  const [organizations, setOrganizations] = useState(FALLBACK_ORGS);
+  const [activeOrg, setActiveOrg] = useState(initialOrg);
 
   const accessTokenRef = useRef(initialAccess);
   const refreshTokenRef = useRef(initialRefresh);
+  const activeOrgRef = useRef(initialOrg);
+  const organizationsRef = useRef(FALLBACK_ORGS);
   const refreshPromiseRef = useRef(null);
+
+  const applyActiveOrg = useCallback((org) => {
+    const nextOrg =
+      org && org.org_id && org.slug
+        ? {
+            org_id: org.org_id,
+            name: org.name || org.slug,
+            slug: org.slug,
+          }
+        : DEFAULT_ORG;
+    activeOrgRef.current = nextOrg;
+    setActiveOrg(nextOrg);
+    writeStoredOrg(nextOrg);
+    return nextOrg;
+  }, []);
+
+  const refreshOrganizations = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/orgs`, {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (!res.ok) return null;
+      const list = await res.json();
+      if (Array.isArray(list) && list.length > 0) {
+        organizationsRef.current = list;
+        setOrganizations(list);
+        const currentSlug = activeOrgRef.current?.slug;
+        const matched = list.find((o) => o.slug === currentSlug || o.org_id === activeOrgRef.current?.org_id);
+        if (matched) {
+          applyActiveOrg(matched);
+        }
+        return list;
+      }
+    } catch {
+      // Keep fallback organizations when backend is offline
+    }
+    return null;
+  }, [applyActiveOrg]);
 
   const applyAuthSession = useCallback((authData) => {
     const nextAccess = authData?.access_token || null;
@@ -135,7 +234,27 @@ export function AuthProvider({ children }) {
 
     writeSessionStorage(ACCESS_TOKEN_KEY, nextAccess);
     writeSessionStorage(REFRESH_TOKEN_KEY, nextRefresh);
-  }, []);
+
+    if (authData?.organization?.org_id && authData?.organization?.slug) {
+      const newOrg = applyActiveOrg(authData.organization);
+      const prev = organizationsRef.current || [];
+      const exists = prev.some((o) => o.org_id === newOrg.org_id || o.slug === newOrg.slug);
+      const nextList = exists ? prev.map((o) => (o.org_id === newOrg.org_id ? newOrg : o)) : [...prev, newOrg];
+      organizationsRef.current = nextList;
+      setOrganizations(nextList);
+    } else if (nextUser?.org_id && nextUser?.org_slug) {
+      const matched = (organizationsRef.current || []).find(
+        (o) => o.org_id === nextUser.org_id || o.slug === nextUser.org_slug
+      );
+      applyActiveOrg(
+        matched || {
+          org_id: nextUser.org_id,
+          name: nextUser.org_slug,
+          slug: nextUser.org_slug,
+        }
+      );
+    }
+  }, [applyActiveOrg]);
 
   const clearAuthSession = useCallback(() => {
     accessTokenRef.current = null;
@@ -190,12 +309,18 @@ export function AuthProvider({ children }) {
 
     const bootstrapSession = async () => {
       try {
-        const refreshed = await refreshSession();
+        const [orgsList, refreshed] = await Promise.all([
+          refreshOrganizations(),
+          refreshSession(),
+        ]);
         const activeToken = refreshed?.access_token || accessTokenRef.current;
 
         const headers = new Headers();
         if (activeToken) {
           headers.set('Authorization', `Bearer ${activeToken}`);
+        }
+        if (activeOrgRef.current?.slug) {
+          headers.set('X-Org-Slug', activeOrgRef.current.slug);
         }
 
         const meRes = await fetch(`${API_BASE_URL}/api/auth/me`, {
@@ -210,6 +335,18 @@ export function AuthProvider({ children }) {
           const meData = await meRes.json();
           if (meData?.authenticated && meData?.user) {
             setUser(meData.user);
+            if (meData.user.org_id && meData.user.org_slug) {
+              const matched = Array.isArray(orgsList)
+                ? orgsList.find((o) => o.org_id === meData.user.org_id || o.slug === meData.user.org_slug)
+                : null;
+              applyActiveOrg(
+                matched || {
+                  org_id: meData.user.org_id,
+                  name: meData.user.org_slug,
+                  slug: meData.user.org_slug,
+                }
+              );
+            }
           } else {
             clearAuthSession();
           }
@@ -232,7 +369,7 @@ export function AuthProvider({ children }) {
     return () => {
       active = false;
     };
-  }, [refreshSession, clearAuthSession]);
+  }, [refreshOrganizations, refreshSession, clearAuthSession, applyActiveOrg]);
 
   const authFetch = useCallback(
     async (url, options = {}) => {
@@ -247,6 +384,9 @@ export function AuthProvider({ children }) {
       if (accessTokenRef.current && !headers.has('Authorization')) {
         headers.set('Authorization', `Bearer ${accessTokenRef.current}`);
       }
+      if (!headers.has('X-Org-Slug') && activeOrgRef.current?.slug) {
+        headers.set('X-Org-Slug', activeOrgRef.current.slug);
+      }
 
       let response = await fetch(targetUrl, {
         ...options,
@@ -259,6 +399,9 @@ export function AuthProvider({ children }) {
         if (refreshed?.access_token) {
           const retryHeaders = new Headers(options.headers || {});
           retryHeaders.set('Authorization', `Bearer ${refreshed.access_token}`);
+          if (!retryHeaders.has('X-Org-Slug') && activeOrgRef.current?.slug) {
+            retryHeaders.set('X-Org-Slug', activeOrgRef.current.slug);
+          }
           response = await fetch(targetUrl, {
             ...options,
             credentials: 'include',
@@ -277,10 +420,16 @@ export function AuthProvider({ children }) {
   const submitAuthRequest = useCallback(
     async (endpointOrUrl, payload, fallbackError) => {
       const targetUrl = resolveApiUrl(endpointOrUrl);
+      const reqHeaders = { 'Content-Type': 'application/json' };
+      const slugForHeader = payload?.org_slug || activeOrgRef.current?.slug;
+      if (slugForHeader) {
+        reqHeaders['X-Org-Slug'] = slugForHeader;
+      }
+
       const res = await fetch(targetUrl, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: reqHeaders,
         body: JSON.stringify(payload),
       });
 
@@ -309,10 +458,11 @@ export function AuthProvider({ children }) {
   );
 
   const login = useCallback(
-    async (email, password) => {
+    async (email, password, orgSlugOverride = null) => {
+      const targetSlug = orgSlugOverride || activeOrgRef.current?.slug || DEFAULT_ORG.slug;
       return submitAuthRequest(
         `${API_BASE_URL}/api/auth/login`,
-        { email: email.trim(), password },
+        { email: email.trim(), password, org_slug: targetSlug },
         'Invalid email or password.'
       );
     },
@@ -320,22 +470,42 @@ export function AuthProvider({ children }) {
   );
 
   const signup = useCallback(
-    async (fullName, email, password) => {
+    async (fullName, email, password, orgSlugOverride = null) => {
+      const targetSlug = orgSlugOverride || activeOrgRef.current?.slug || DEFAULT_ORG.slug;
       return submitAuthRequest(
         `${API_BASE_URL}/api/auth/signup`,
-        { full_name: fullName.trim(), email: email.trim(), password },
+        { full_name: fullName.trim(), email: email.trim(), password, org_slug: targetSlug },
         'Unable to create account. Please verify your details.'
       );
     },
     [submitAuthRequest]
   );
 
+  const registerOrganization = useCallback(
+    async ({ orgName, orgSlug, supervisorName, supervisorEmail, password }) => {
+      const data = await submitAuthRequest(
+        `${API_BASE_URL}/api/orgs/register`,
+        {
+          org_name: orgName.trim(),
+          org_slug: orgSlug.trim().toLowerCase(),
+          supervisor_name: supervisorName.trim(),
+          supervisor_email: supervisorEmail.trim(),
+          password,
+        },
+        'Unable to register organization. Please verify your details.'
+      );
+      await refreshOrganizations();
+      return data;
+    },
+    [submitAuthRequest, refreshOrganizations]
+  );
+
   const loginAsDemo = useCallback(
     async (role) => {
-      if (role === 'supervisor') {
-        return login('supervisor@nexusrag.ai', 'Supervisor@2026!');
-      }
-      return login('user@nexusrag.ai', 'DemoUser@2026!');
+      const slug = activeOrgRef.current?.slug || DEFAULT_ORG.slug;
+      const orgCreds = ORG_DEMO_ACCOUNTS[slug] || ORG_DEMO_ACCOUNTS.nexus;
+      const creds = role === 'supervisor' ? orgCreds.supervisor : orgCreds.user;
+      return login(creds.email, creds.password, slug);
     },
     [login]
   );
@@ -356,6 +526,28 @@ export function AuthProvider({ children }) {
     }
   }, [clearAuthSession]);
 
+  const switchOrg = useCallback(
+    async (orgOrSlug) => {
+      const targetOrg =
+        typeof orgOrSlug === 'string'
+          ? organizations.find((o) => o.slug === orgOrSlug || o.org_id === orgOrSlug) || DEFAULT_ORG
+          : orgOrSlug || DEFAULT_ORG;
+
+      if (targetOrg.org_id === activeOrgRef.current?.org_id) {
+        return targetOrg;
+      }
+
+      if (accessTokenRef.current || refreshTokenRef.current) {
+        await logout();
+      } else {
+        clearAuthSession();
+      }
+
+      return applyActiveOrg(targetOrg);
+    },
+    [organizations, logout, clearAuthSession, applyActiveOrg]
+  );
+
   const value = useMemo(
     () => ({
       user,
@@ -364,6 +556,11 @@ export function AuthProvider({ children }) {
       authLoading,
       isAuthenticated: Boolean(user),
       isSupervisor: user?.role === 'supervisor',
+      organizations,
+      activeOrg,
+      switchOrg,
+      refreshOrganizations,
+      registerOrganization,
       authFetch,
       login,
       signup,
@@ -376,6 +573,11 @@ export function AuthProvider({ children }) {
       accessToken,
       refreshToken,
       authLoading,
+      organizations,
+      activeOrg,
+      switchOrg,
+      refreshOrganizations,
+      registerOrganization,
       authFetch,
       login,
       signup,

@@ -26,29 +26,31 @@ def _supervisor_headers() -> dict:
 @pytest.fixture(autouse=True)
 def cleanup_uploads_directory():
     """Cleans up any uploaded files in data/uploads/ before and after each test."""
-    upload_dir = Path("data/uploads")
+    upload_dirs = [Path("data/uploads"), Path("data/uploads/org_nexus")]
     test_files = ["cloud_migration_policy.txt", "it_hardware_assets.csv", "enterprise_stock.xlsx"]
-    for fname in test_files:
-        p = upload_dir / fname
-        if p.exists():
-            try:
-                p.unlink()
-            except Exception:
-                pass
+    for upload_dir in upload_dirs:
+        for fname in test_files:
+            p = upload_dir / fname
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
     yield
-    for fname in test_files:
-        p = upload_dir / fname
-        if p.exists():
-            try:
-                p.unlink()
-            except Exception:
-                pass
+    for upload_dir in upload_dirs:
+        for fname in test_files:
+            p = upload_dir / fname
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
 
 @pytest.mark.asyncio
 async def test_upload_txt_document():
     """Verifies that .txt document upload parses, chunks, and returns suggested prompt chips."""
-    created_file = Path("data/uploads/cloud_migration_policy.txt")
+    created_file = Path("data/uploads/org_nexus/cloud_migration_policy.txt")
     try:
         txt_content = (
             "Nexus Enterprise Cloud Migration Guidelines.\n"
@@ -85,7 +87,7 @@ async def test_upload_txt_document():
 @pytest.mark.asyncio
 async def test_upload_csv_dataset():
     """Verifies that .csv upload saves into SQLite, indexes schema summary, and returns suggested queries."""
-    created_file = Path("data/uploads/it_hardware_assets.csv")
+    created_file = Path("data/uploads/org_nexus/it_hardware_assets.csv")
     try:
         csv_content = (
             "asset_id,asset_name,department,status,warranty_end\n"
@@ -107,7 +109,7 @@ async def test_upload_csv_dataset():
             assert data["filename"] == "it_hardware_assets.csv"
             assert data["file_type"] == ".csv"
             assert len(data["tables_created"]) >= 1
-            assert "upload_it_hardware_assets" in data["tables_created"]
+            assert "upload_org_nexus_it_hardware_assets" in data["tables_created"]
             assert isinstance(data["suggested_prompts"], list)
             assert len(data["suggested_prompts"]) >= 2
     finally:
@@ -121,7 +123,7 @@ async def test_upload_csv_dataset():
 @pytest.mark.asyncio
 async def test_upload_xlsx_workbook():
     """Verifies that multi-sheet .xlsx Excel files load into SQLite tables and return suggested prompts."""
-    created_file = Path("data/uploads/enterprise_stock.xlsx")
+    created_file = Path("data/uploads/org_nexus/enterprise_stock.xlsx")
     try:
         # Create an in-memory Excel workbook with openpyxl
         excel_buffer = io.BytesIO()

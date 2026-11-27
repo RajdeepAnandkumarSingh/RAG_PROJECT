@@ -46,7 +46,12 @@ class SemanticCache:
         self.threshold = threshold if threshold is not None else settings.SEMANTIC_CACHE_THRESHOLD
         self._redis_client: Optional[aioredis.Redis] = None
         self._embeddings_model: Optional[FastEmbedEmbeddings] = None
-        self._key_prefix = "nexus:cache:"
+        self._key_prefix = "semcache:"
+
+    @staticmethod
+    def org_prefix(org_id: str = "org_nexus") -> str:
+        safe_org = (org_id or "org_nexus").strip() or "org_nexus"
+        return f"semcache:{safe_org}:"
 
     def _get_embeddings_model(self) -> FastEmbedEmbeddings:
         """Lazy access to FastEmbed embeddings model."""
@@ -70,15 +75,17 @@ class SemanticCache:
             )
         return self._redis_client
 
-    async def lookup(self, query: str) -> Optional[Dict[str, Any]]:
+    async def lookup(self, query: str, org_id: str = "org_nexus") -> Optional[Dict[str, Any]]:
         """
-        Looks up query in the semantic cache.
+        Looks up query in the tenant-namespaced semantic cache (`semcache:{org_id}:*`).
         Returns matched dict if similarity >= threshold, else None.
         Fails open gracefully on any Redis error.
         """
+        resolved_org = (org_id or "org_nexus").strip() or "org_nexus"
+        prefix = self.org_prefix(resolved_org)
         try:
             client = await self.get_client()
-            
+
             # Check Redis connection quickly
             try:
                 await client.ping()
@@ -86,16 +93,16 @@ class SemanticCache:
                 logger.warning(f"Redis offline or unreachable in lookup: {e}. Failing open.")
                 return None
 
-            # Find all semantic cache keys
-            keys = await client.keys(f"{self._key_prefix}*")
+            # Find all semantic cache keys scoped to this organization
+            keys = await client.keys(f"{prefix}*")
             if not keys:
                 return None
 
             query_embedding = await self.get_embedding(query)
-            
+
             # Fetch all cached entries in batch
             raw_entries = await client.mget(keys)
-            
+
             best_match: Optional[Dict[str, Any]] = None
             highest_score: float = -1.0
 
@@ -104,14 +111,17 @@ class SemanticCache:
                     continue
                 try:
                     entry = json.loads(raw)
+                    entry_org = entry.get("org_id")
+                    if entry_org and entry_org != resolved_org:
+                        continue
                     cached_embedding = entry.get("embedding")
                     if not cached_embedding:
                         continue
-                    
+
                     score = await asyncio.to_thread(
                         compute_cosine_similarity, query_embedding, cached_embedding
                     )
-                    
+
                     if score > highest_score:
                         highest_score = score
                         best_match = entry
@@ -121,19 +131,20 @@ class SemanticCache:
 
             if best_match and highest_score >= self.threshold:
                 logger.info(
-                    f"Semantic cache HIT (score={highest_score:.4f} >= {self.threshold}): "
+                    f"Semantic cache HIT (org={resolved_org}, score={highest_score:.4f} >= {self.threshold}): "
                     f"'{query}' matched '{best_match.get('query')}'"
                 )
                 return {
                     "hit": True,
                     "similarity": highest_score,
+                    "org_id": resolved_org,
                     "query": best_match.get("query"),
                     "response": best_match.get("response"),
                     "intent": best_match.get("intent", "safe_rag"),
                     "context": best_match.get("context", []),
                     "retrieved_chunks": best_match.get("retrieved_chunks", [])
                 }
-            
+
             return None
 
         except Exception as e:
@@ -147,19 +158,23 @@ class SemanticCache:
         intent: str = "safe_rag",
         context: Optional[List[str]] = None,
         retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
-        embedding: Optional[List[float]] = None
+        embedding: Optional[List[float]] = None,
+        org_id: str = "org_nexus",
     ) -> bool:
         """
-        Stores query, response, and metadata in semantic cache with TTL.
+        Stores query, response, and metadata in tenant-namespaced semantic cache (`semcache:{org_id}:{hash}`).
         Fails open gracefully without throwing.
         """
         # Only cache safe_rag responses
         if intent != "safe_rag":
             return False
 
+        resolved_org = (org_id or "org_nexus").strip() or "org_nexus"
+        prefix = self.org_prefix(resolved_org)
+
         try:
             client = await self.get_client()
-            
+
             try:
                 await client.ping()
             except Exception as e:
@@ -170,6 +185,7 @@ class SemanticCache:
                 embedding = await self.get_embedding(query)
 
             payload = {
+                "org_id": resolved_org,
                 "query": query,
                 "response": response,
                 "intent": intent,
@@ -180,7 +196,7 @@ class SemanticCache:
             }
 
             key_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
-            cache_key = f"{self._key_prefix}{key_hash}"
+            cache_key = f"{prefix}{key_hash}"
 
             await client.set(cache_key, json.dumps(payload), ex=self.ttl)
             logger.info(f"Cached semantic query '{query}' (key={cache_key}, TTL={self.ttl}s)")
@@ -189,6 +205,31 @@ class SemanticCache:
         except Exception as e:
             logger.warning(f"Failed to write to Redis semantic cache: {e}. Failing open.")
             return False
+
+    async def invalidate_org(self, org_id: str = "org_nexus") -> int:
+        """
+        Invalidates all semantic cache entries for a specific organization (`semcache:{org_id}:*`).
+        Fails open returning 0 if Redis is offline.
+        """
+        resolved_org = (org_id or "org_nexus").strip() or "org_nexus"
+        pattern = f"{self.org_prefix(resolved_org)}*"
+        try:
+            client = await self.get_client()
+            try:
+                await client.ping()
+            except Exception as e:
+                logger.warning(f"Redis offline in invalidate_org: {e}. Skipping invalidation.")
+                return 0
+
+            keys = await client.keys(pattern)
+            if not keys:
+                return 0
+            deleted = await client.delete(*keys)
+            logger.info(f"Invalidated {deleted} semantic cache key(s) matching '{pattern}'")
+            return int(deleted)
+        except Exception as e:
+            logger.warning(f"Failed to invalidate Redis semantic cache for org={resolved_org}: {e}")
+            return 0
 
     async def close(self):
         """Closes the async Redis client connection cleanly."""

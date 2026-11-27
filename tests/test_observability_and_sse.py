@@ -10,6 +10,7 @@ from schemas.routing import RouteDecision
 from schemas.grading import GradeResult
 from server import server
 from config import settings
+from utils.auth import create_access_token
 from utils.observability import get_langfuse_callback, flush_langfuse, aflush_langfuse
 from main import app as graph_app
 
@@ -341,10 +342,19 @@ def test_sse_stream_escalation_hitl_and_resume():
                 assert snapshot.next == ("human_review_node",)
 
                 # 3. Resume with Supervisor Override
+                supervisor_token = create_access_token(
+                    {
+                        "id": "test-supervisor-id",
+                        "email": "supervisor@nexusrag.ai",
+                        "role": "supervisor",
+                        "name": "Sarah Chen (Supervisor)",
+                    }
+                )
                 supervisor_msg = "Executive Supervisor: Apologies for the dispute. A full refund of $500 has been credited."
                 resume_resp = await client.post(
                     "/api/chat/resume",
-                    json={"thread_id": thread_id, "response": supervisor_msg}
+                    json={"thread_id": thread_id, "response": supervisor_msg},
+                    headers={"Authorization": f"Bearer {supervisor_token}"},
                 )
                 assert resume_resp.status_code == 200
                 resume_data = resume_resp.json()

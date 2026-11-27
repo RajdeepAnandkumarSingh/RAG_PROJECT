@@ -17,8 +17,19 @@ import {
   LogIn,
   UserPlus,
   Activity,
+  Building2,
+  Globe,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { ORG_DEMO_ACCOUNTS, useAuth } from '../context/AuthContext';
+
+function slugifyOrgName(name) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
 
 export default function AuthModal({
   isOpen,
@@ -28,23 +39,31 @@ export default function AuthModal({
   contextBanner = '',
   onSuccess,
 }) {
-  const { login, signup, loginAsDemo } = useAuth();
+  const { login, signup, loginAsDemo, registerOrganization, activeOrg } = useAuth();
   const isDark = theme === 'dark';
 
   const [activeTab, setActiveTab] = useState(initialTab);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [orgName, setOrgName] = useState('');
+  const [orgSlug, setOrgSlug] = useState('');
+  const [slugTouched, setSlugTouched] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
+
+  const demoAccountsForOrg = ORG_DEMO_ACCOUNTS[activeOrg?.slug] || null;
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab || 'signin');
       setErrorMsg('');
       setPassword('');
+      setOrgName('');
+      setOrgSlug('');
+      setSlugTouched(false);
       setShowPassword(false);
     }
   }, [isOpen, initialTab]);
@@ -139,6 +158,47 @@ export default function AuthModal({
       return;
     }
 
+    if (activeTab === 'register_org') {
+      const cleanOrgName = orgName.trim();
+      const cleanSlug = orgSlug.trim().toLowerCase();
+      const cleanSupervisorName = fullName.trim();
+      if (cleanOrgName.length < 2) {
+        setErrorMsg('Organization name must be at least 2 characters.');
+        return;
+      }
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(cleanSlug) || cleanSlug.length < 2) {
+        setErrorMsg('Organization slug must use lowercase letters, numbers, and hyphens (min 2 chars).');
+        return;
+      }
+      if (cleanSupervisorName.length < 2) {
+        setErrorMsg('Supervisor name must be at least 2 characters.');
+        return;
+      }
+      if (!allPasswordChecksPassed) {
+        setErrorMsg('Please satisfy all 5 password security requirements below.');
+        return;
+      }
+
+      setSubmitting('form');
+      setErrorMsg('');
+      try {
+        const res = await registerOrganization({
+          orgName: cleanOrgName,
+          orgSlug: cleanSlug,
+          supervisorName: cleanSupervisorName,
+          supervisorEmail: cleanEmail,
+          password,
+        });
+        onSuccess?.(res);
+        onClose();
+      } catch (err) {
+        handleAuthError(err);
+      } finally {
+        setSubmitting(null);
+      }
+      return;
+    }
+
     if (activeTab === 'signup') {
       const cleanName = fullName.trim();
       if (cleanName.length < 2) {
@@ -171,6 +231,7 @@ export default function AuthModal({
   };
 
   const isDisabled = Boolean(submitting) || cooldownSeconds > 0;
+  const requiresPasswordChecklist = activeTab === 'signup' || activeTab === 'register_org';
 
   return (
     <AnimatePresence>
@@ -230,7 +291,9 @@ export default function AuthModal({
                     </span>
                   </div>
                   <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                    Argon2id + Rotating JWT Sessions
+                    {activeTab === 'register_org'
+                      ? 'Create Isolated Tenant Workspace & Supervisor'
+                      : `Signing in to ${activeOrg?.name || 'Nexus Enterprise'}`}
                   </p>
                 </div>
               </div>
@@ -250,7 +313,37 @@ export default function AuthModal({
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
+            <div className="p-5 space-y-4 max-h-[82vh] overflow-y-auto">
+              {/* Active Tenant Workspace Context Pill */}
+              {activeTab !== 'register_org' && (
+                <div
+                  className={`flex items-center justify-between px-3 py-2 rounded-xl border text-xs ${
+                    isDark
+                      ? 'bg-[#0F1629]/80 border-[#1E293B] text-slate-200'
+                      : 'bg-emerald-50/70 border-emerald-200 text-slate-800'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Building2 className="w-3.5 h-3.5 text-accent-emerald flex-shrink-0" />
+                    <span className="truncate font-semibold">
+                      {activeTab === 'signup' ? 'Creating account in ' : 'Signing in to '}
+                      <strong className={isDark ? 'text-white' : 'text-slate-950'}>
+                        {activeOrg?.name || 'Nexus Enterprise'}
+                      </strong>
+                    </span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase border flex-shrink-0 ${
+                      isDark
+                        ? 'bg-accent-emerald/15 text-emerald-300 border-accent-emerald/30'
+                        : 'bg-white text-emerald-800 border-emerald-200'
+                    }`}
+                  >
+                    {activeOrg?.slug || 'nexus'}
+                  </span>
+                </div>
+              )}
+
               {/* Optional Contextual Banner */}
               {contextBanner && (
                 <div
@@ -265,70 +358,82 @@ export default function AuthModal({
                 </div>
               )}
 
-              {/* 1-Click Demo Login Section */}
-              <div
-                className={`p-3.5 rounded-xl border space-y-2.5 ${
-                  isDark
-                    ? 'bg-[#0F1629]/75 border-[#1E293B]'
-                    : 'bg-emerald-50/45 border-emerald-200/80'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span
-                    className={`text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 ${
-                      isDark ? 'text-slate-300' : 'text-slate-700'
-                    }`}
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-accent-emerald" />
-                    Instant Demo Access (Zero Typing)
-                  </span>
-                  <span className={`text-[9px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                    1-Click Sign In
-                  </span>
+              {/* 1-Click Demo Login Section (Active Tenant Scoped) */}
+              {activeTab !== 'register_org' && demoAccountsForOrg && (
+                <div
+                  className={`p-3.5 rounded-xl border space-y-2.5 ${
+                    isDark
+                      ? 'bg-[#0F1629]/75 border-[#1E293B]'
+                      : 'bg-emerald-50/45 border-emerald-200/80'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={`text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+                        isDark ? 'text-slate-300' : 'text-slate-700'
+                      }`}
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-accent-emerald" />
+                      Instant Demo Access ({activeOrg?.name})
+                    </span>
+                    <span className={`text-[9px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                      1-Click Sign In
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={isDisabled}
+                      onClick={() => handleDemoClick('user')}
+                      className={`flex flex-col items-start justify-center px-3 py-2 rounded-xl border text-xs font-bold transition-all active:scale-[0.98] disabled:opacity-45 disabled:pointer-events-none ${
+                        isDark
+                          ? 'bg-accent-emerald/15 hover:bg-accent-emerald/25 border-accent-emerald/35 text-emerald-300'
+                          : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-800'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 w-full">
+                        {submitting === 'demo-user' ? (
+                          <Activity className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                        ) : (
+                          <User className="w-3.5 h-3.5 flex-shrink-0" />
+                        )}
+                        <span className="truncate">1-Click Demo: Analyst</span>
+                      </div>
+                      <span className="text-[10px] font-mono font-normal opacity-80 truncate w-full text-left mt-0.5">
+                        {demoAccountsForOrg.user.email}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isDisabled}
+                      onClick={() => handleDemoClick('supervisor')}
+                      className={`flex flex-col items-start justify-center px-3 py-2 rounded-xl border text-xs font-bold transition-all active:scale-[0.98] disabled:opacity-45 disabled:pointer-events-none ${
+                        isDark
+                          ? 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/35 text-amber-300'
+                          : 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 w-full">
+                        {submitting === 'demo-supervisor' ? (
+                          <Activity className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
+                        )}
+                        <span className="truncate">1-Click Demo: Supervisor</span>
+                      </div>
+                      <span className="text-[10px] font-mono font-normal opacity-80 truncate w-full text-left mt-0.5">
+                        {demoAccountsForOrg.supervisor.email}
+                      </span>
+                    </button>
+                  </div>
                 </div>
+              )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={isDisabled}
-                    onClick={() => handleDemoClick('user')}
-                    className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-all active:scale-[0.98] disabled:opacity-45 disabled:pointer-events-none ${
-                      isDark
-                        ? 'bg-accent-emerald/15 hover:bg-accent-emerald/25 border-accent-emerald/35 text-emerald-300'
-                        : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-800'
-                    }`}
-                  >
-                    {submitting === 'demo-user' ? (
-                      <Activity className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
-                    ) : (
-                      <User className="w-3.5 h-3.5 flex-shrink-0" />
-                    )}
-                    <span className="truncate">1-Click Demo: Analyst (User)</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isDisabled}
-                    onClick={() => handleDemoClick('supervisor')}
-                    className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-all active:scale-[0.98] disabled:opacity-45 disabled:pointer-events-none ${
-                      isDark
-                        ? 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/35 text-amber-300'
-                        : 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900'
-                    }`}
-                  >
-                    {submitting === 'demo-supervisor' ? (
-                      <Activity className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
-                    ) : (
-                      <ShieldCheck className="w-3.5 h-3.5 flex-shrink-0" />
-                    )}
-                    <span className="truncate">1-Click Demo: Supervisor (Admin)</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Sign In / Create Account Tabs */}
+              {/* Sign In / Create Account / Register Organization Tabs */}
               <div
-                className={`grid grid-cols-2 gap-1 p-1 rounded-xl border ${
+                className={`grid grid-cols-3 gap-1 p-1 rounded-xl border ${
                   isDark
                     ? 'bg-[#090D18]/80 border-[#1E293B]'
                     : 'bg-emerald-50/50 border-emerald-200/70'
@@ -337,7 +442,7 @@ export default function AuthModal({
                 <button
                   type="button"
                   onClick={() => handleTabSwitch('signin')}
-                  className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold transition-all ${
+                  className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-[11px] font-bold transition-all ${
                     activeTab === 'signin'
                       ? isDark
                         ? 'bg-[#161F36] text-white shadow-sm border border-white/10'
@@ -347,13 +452,13 @@ export default function AuthModal({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>Sign In</span>
+                  <LogIn className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Sign In</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleTabSwitch('signup')}
-                  className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold transition-all ${
+                  className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-[11px] font-bold transition-all ${
                     activeTab === 'signup'
                       ? isDark
                         ? 'bg-[#161F36] text-white shadow-sm border border-white/10'
@@ -363,8 +468,24 @@ export default function AuthModal({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>Create Account</span>
+                  <UserPlus className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Create Account</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTabSwitch('register_org')}
+                  className={`flex items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                    activeTab === 'register_org'
+                      ? isDark
+                        ? 'bg-[#161F36] text-white shadow-sm border border-white/10'
+                        : 'bg-white text-slate-900 shadow-xs border border-emerald-200'
+                      : isDark
+                      ? 'text-slate-400 hover:text-slate-200'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Register Org</span>
                 </button>
               </div>
 
@@ -410,7 +531,82 @@ export default function AuthModal({
 
               {/* Form */}
               <form onSubmit={handleFormSubmit} className="space-y-3.5">
-                {activeTab === 'signup' && (
+                {activeTab === 'register_org' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="auth-org-name"
+                        className={`block text-[11px] font-bold uppercase tracking-wider ${
+                          isDark ? 'text-slate-400' : 'text-slate-600'
+                        }`}
+                      >
+                        Organization Name
+                      </label>
+                      <div className="relative flex items-center">
+                        <Building2 className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
+                        <input
+                          id="auth-org-name"
+                          type="text"
+                          value={orgName}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setOrgName(val);
+                            if (!slugTouched) {
+                              setOrgSlug(slugifyOrgName(val));
+                            }
+                          }}
+                          placeholder="Acme Support"
+                          maxLength={80}
+                          required
+                          disabled={isDisabled}
+                          className={`w-full rounded-xl py-2.5 pl-10 pr-3 text-sm border transition-all focus:outline-none focus:ring-2 disabled:opacity-50 ${
+                            isDark
+                              ? 'bg-[#0F1629]/85 border-[#1E293B] text-slate-100 placeholder:text-slate-500 focus:border-accent-emerald/60 focus:ring-accent-emerald/20'
+                              : 'bg-white border-emerald-200 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-emerald-500/20'
+                          }`}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="auth-org-slug"
+                        className={`block text-[11px] font-bold uppercase tracking-wider ${
+                          isDark ? 'text-slate-400' : 'text-slate-600'
+                        }`}
+                      >
+                        Workspace Slug
+                      </label>
+                      <div className="relative flex items-center">
+                        <Globe className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
+                        <input
+                          id="auth-org-slug"
+                          type="text"
+                          value={orgSlug}
+                          onChange={(e) => {
+                            setSlugTouched(true);
+                            setOrgSlug(
+                              e.target.value
+                                .toLowerCase()
+                                .replace(/[^a-z0-9-]/g, '-')
+                            );
+                          }}
+                          placeholder="acme-support"
+                          maxLength={40}
+                          required
+                          disabled={isDisabled}
+                          className={`w-full rounded-xl py-2.5 pl-10 pr-3 text-sm font-mono border transition-all focus:outline-none focus:ring-2 disabled:opacity-50 ${
+                            isDark
+                              ? 'bg-[#0F1629]/85 border-[#1E293B] text-slate-100 placeholder:text-slate-500 focus:border-accent-emerald/60 focus:ring-accent-emerald/20'
+                              : 'bg-white border-emerald-200 text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-emerald-500/20'
+                          }`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {(activeTab === 'signup' || activeTab === 'register_org') && (
                   <div className="space-y-1.5">
                     <label
                       htmlFor="auth-fullname"
@@ -418,7 +614,7 @@ export default function AuthModal({
                         isDark ? 'text-slate-400' : 'text-slate-600'
                       }`}
                     >
-                      Full Name
+                      {activeTab === 'register_org' ? 'Supervisor Full Name' : 'Full Name'}
                     </label>
                     <div className="relative flex items-center">
                       <User className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
@@ -448,7 +644,7 @@ export default function AuthModal({
                       isDark ? 'text-slate-400' : 'text-slate-600'
                     }`}
                   >
-                    Email Address
+                    {activeTab === 'register_org' ? 'Supervisor Email Address' : 'Email Address'}
                   </label>
                   <div className="relative flex items-center">
                     <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 pointer-events-none" />
@@ -510,8 +706,8 @@ export default function AuthModal({
                   </div>
                 </div>
 
-                {/* Live Password Strength & Policy Checklist (Create Account) */}
-                {activeTab === 'signup' && (
+                {/* Live Password Strength & Policy Checklist (Create Account & Register Org) */}
+                {requiresPasswordChecklist && (
                   <div
                     className={`p-3 rounded-xl border space-y-2.5 ${
                       isDark
@@ -578,7 +774,7 @@ export default function AuthModal({
                 <button
                   type="submit"
                   disabled={
-                    isDisabled || (activeTab === 'signup' && !allPasswordChecksPassed)
+                    isDisabled || (requiresPasswordChecklist && !allPasswordChecksPassed)
                   }
                   className="w-full py-2.5 rounded-xl bg-gradient-to-r from-accent-emerald to-indigo-600 hover:brightness-110 active:scale-[0.99] text-white font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-45 disabled:pointer-events-none shadow-md shadow-emerald-500/20"
                 >
@@ -586,13 +782,22 @@ export default function AuthModal({
                     <>
                       <Activity className="w-4 h-4 animate-spin" />
                       <span>
-                        {activeTab === 'signup' ? 'Creating Account...' : 'Authenticating...'}
+                        {activeTab === 'register_org'
+                          ? 'Creating Workspace...'
+                          : activeTab === 'signup'
+                          ? 'Creating Account...'
+                          : 'Authenticating...'}
                       </span>
                     </>
                   ) : cooldownSeconds > 0 ? (
                     <>
                       <Clock className="w-4 h-4" />
                       <span>Retry in {cooldownSeconds}s</span>
+                    </>
+                  ) : activeTab === 'register_org' ? (
+                    <>
+                      <Building2 className="w-4 h-4" />
+                      <span>Create Workspace &amp; Supervisor</span>
                     </>
                   ) : activeTab === 'signup' ? (
                     <>

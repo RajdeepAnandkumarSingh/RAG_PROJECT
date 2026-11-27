@@ -24,11 +24,17 @@ from main import app as graph_app
 from config import settings
 from utils.observability import get_langfuse_callback, aflush_langfuse, flush_langfuse
 from utils.semantic_cache import get_semantic_cache
+from utils.hybrid_retriever import get_bm25_path
+from utils.order_db import init_orders_table
 from utils.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     AccountLockedError,
+    DEFAULT_ORG_ID,
+    DEFAULT_ORG_SLUG,
     InvalidCredentialsError,
     InvalidRefreshTokenError,
+    OrgAlreadyExistsError,
+    OrgNotFoundError,
     REFRESH_COOKIE_NAME,
     UserAlreadyExistsError,
     authenticate_user,
@@ -36,25 +42,37 @@ from utils.auth import (
     create_access_token,
     create_refresh_session,
     create_user,
+    get_escalated_thread_org_id,
     get_optional_user,
+    get_organization_by_slug,
+    get_tenant_context,
     init_auth_db,
+    list_organizations,
     rate_limit_login,
+    rate_limit_org_register,
     rate_limit_refresh,
     rate_limit_signup,
+    record_escalated_thread,
     record_user_thread,
+    register_organization,
     require_supervisor,
     revoke_refresh_session,
     rotate_refresh_session,
     seed_demo_users,
     set_refresh_cookie,
 )
-from ingest import process_uploaded_file
+from ingest import ensure_tenant_seed_docs_indexed, process_uploaded_file
 
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     await asyncio.to_thread(init_auth_db)
-    await asyncio.to_thread(seed_demo_users)
+    await asyncio.to_thread(seed_demo_users, None, True)
+    await asyncio.to_thread(init_orders_table)
+    try:
+        await asyncio.to_thread(ensure_tenant_seed_docs_indexed)
+    except Exception:
+        pass
     yield
     await get_semantic_cache().close()
 
@@ -99,18 +117,39 @@ server.add_middleware(
 )
 
 
+def _validate_password_strength(v: str) -> str:
+    if not any(c.isupper() for c in v):
+        raise ValueError("Password must include at least one uppercase letter.")
+    if not any(c.islower() for c in v):
+        raise ValueError("Password must include at least one lowercase letter.")
+    if not any(c.isdigit() for c in v):
+        raise ValueError("Password must include at least one digit.")
+    if not any(not c.isalnum() and not c.isspace() for c in v):
+        raise ValueError("Password must include at least one special character.")
+    return v
+
+
+class OrganizationPublic(BaseModel):
+    org_id: str
+    name: str
+    slug: str
+
+
 class UserPublic(BaseModel):
     id: str
     email: EmailStr
     full_name: str
     name: str
     role: str
+    org_id: str = DEFAULT_ORG_ID
+    org_slug: str = DEFAULT_ORG_SLUG
 
 
 class SignupRequest(BaseModel):
     email: EmailStr
     full_name: str = Field(..., min_length=2, max_length=60)
     password: str = Field(..., min_length=8, max_length=128)
+    org_slug: Optional[str] = None
 
     @field_validator("full_name", mode="before")
     @classmethod
@@ -122,20 +161,40 @@ class SignupRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password_complexity(cls, v: str) -> str:
-        if not any(c.isupper() for c in v):
-            raise ValueError("Password must include at least one uppercase letter.")
-        if not any(c.islower() for c in v):
-            raise ValueError("Password must include at least one lowercase letter.")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("Password must include at least one digit.")
-        if not any(not c.isalnum() and not c.isspace() for c in v):
-            raise ValueError("Password must include at least one special character.")
+        return _validate_password_strength(v)
+
+
+class OrgRegisterRequest(BaseModel):
+    org_name: str = Field(..., min_length=2, max_length=80)
+    org_slug: str = Field(..., min_length=2, max_length=40, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    supervisor_name: str = Field(..., min_length=2, max_length=60)
+    supervisor_email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("org_name", "supervisor_name", mode="before")
+    @classmethod
+    def strip_names(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip()
         return v
+
+    @field_validator("org_slug", mode="before")
+    @classmethod
+    def normalize_slug(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_complexity(cls, v: str) -> str:
+        return _validate_password_strength(v)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=1)
+    org_slug: Optional[str] = None
 
 
 class RefreshRequest(BaseModel):
@@ -148,6 +207,7 @@ class AuthResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
     user: UserPublic
+    organization: Optional[OrganizationPublic] = None
 
 
 class AuthMeResponse(BaseModel):
@@ -191,7 +251,7 @@ class TelemetryResponse(BaseModel):
     reranker_model: str = Field(default="ms-marco-MiniLM-L-12-v2", description="Cross-encoder reranker model")
     groq_model: str = Field(default="openai/gpt-oss-120b", description="Active Groq LLM generator model")
 
-def collect_telemetry_stats() -> Dict[str, Any]:
+def collect_telemetry_stats(org_id: Optional[str] = None) -> Dict[str, Any]:
     """Collects RAGAS benchmark scores and live index metrics with graceful fallbacks."""
     composite_score = 0.9404
     faithfulness = 0.9583
@@ -203,6 +263,7 @@ def collect_telemetry_stats() -> Dict[str, Any]:
     embedding_model = settings.EMBEDDING_MODEL or "all-MiniLM-L6-v2"
     reranker_model = settings.RERANKER_MODEL or "ms-marco-MiniLM-L-12-v2"
     groq_model = settings.GROQ_MODEL_GENERATOR or "openai/gpt-oss-120b"
+    resolved_org = (org_id or DEFAULT_ORG_ID).strip() or DEFAULT_ORG_ID
 
     # 1. Read evals/results.json
     try:
@@ -221,31 +282,39 @@ def collect_telemetry_stats() -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 2. ChromaDB chunk count
+    # 2. ChromaDB chunk count (scoped by org_id when requested, with total fallback)
     try:
-        chroma_sqlite = Path(settings.CHROMA_PERSIST_DIRECTORY) / "chroma.sqlite3"
-        if chroma_sqlite.exists():
-            import sqlite3
-            with sqlite3.connect(f"file:{chroma_sqlite}?mode=ro", uri=True) as c_conn:
-                cursor = c_conn.cursor()
-                cursor.execute("SELECT count(*) FROM embeddings")
-                row = cursor.fetchone()
-                if row and row[0] > 0:
-                    chroma_chunk_count = int(row[0])
-        else:
+        if org_id is not None:
             import chromadb
             client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIRECTORY)
             col = client.get_collection(settings.CHROMA_COLLECTION_NAME)
-            cnt = col.count()
-            if cnt > 0:
-                chroma_chunk_count = cnt
+            res = col.get(where={"org_id": resolved_org}, include=[])
+            chroma_chunk_count = len(res.get("ids", [])) if res else 0
+        else:
+            chroma_sqlite = Path(settings.CHROMA_PERSIST_DIRECTORY) / "chroma.sqlite3"
+            if chroma_sqlite.exists():
+                import sqlite3
+                with sqlite3.connect(f"file:{chroma_sqlite}?mode=ro", uri=True) as c_conn:
+                    cursor = c_conn.cursor()
+                    cursor.execute("SELECT count(*) FROM embeddings")
+                    row = cursor.fetchone()
+                    if row and row[0] > 0:
+                        chroma_chunk_count = int(row[0])
+            else:
+                import chromadb
+                client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIRECTORY)
+                col = client.get_collection(settings.CHROMA_COLLECTION_NAME)
+                cnt = col.count()
+                if cnt > 0:
+                    chroma_chunk_count = cnt
     except Exception:
         pass
 
-    # 3. BM25 index status
+    # 3. Per-Org BM25 index status
     try:
-        bm25_path = Path(settings.BM25_INDEX_PATH)
-        if bm25_path.exists():
+        org_bm25_path = Path(get_bm25_path(resolved_org))
+        legacy_bm25_path = Path(settings.BM25_INDEX_PATH)
+        if org_bm25_path.exists() or (resolved_org == DEFAULT_ORG_ID and legacy_bm25_path.exists()):
             bm25_status = "Active"
         else:
             bm25_status = "Ready (Cold)"
@@ -295,9 +364,55 @@ def format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     data = {"event": event_name, "stage": event_name, **payload}
     return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
+@server.get("/api/orgs", response_model=List[OrganizationPublic])
+async def get_orgs():
+    """Returns all available multi-tenant organization workspaces."""
+    orgs = await asyncio.to_thread(list_organizations)
+    return [OrganizationPublic(**o) for o in orgs]
+
+
+@server.post("/api/orgs/register", response_model=AuthResponse, dependencies=[Depends(rate_limit_org_register)])
+async def register_org(payload: OrgRegisterRequest, response: Response):
+    """
+    Rate-limited self-service endpoint to create a new organization workspace
+    alongside its initial Supervisor account, returning dual JWT + refresh tokens.
+    """
+    try:
+        org, supervisor = await asyncio.to_thread(
+            register_organization,
+            payload.org_name,
+            payload.org_slug,
+            payload.supervisor_name,
+            payload.supervisor_email,
+            payload.password,
+        )
+    except (OrgAlreadyExistsError, UserAlreadyExistsError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    refresh_token = await asyncio.to_thread(create_refresh_session, supervisor["id"])
+    access_token = create_access_token(supervisor)
+    set_refresh_cookie(response, refresh_token)
+    return AuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=UserPublic(**supervisor),
+        organization=OrganizationPublic(**org),
+    )
+
+
 @server.post("/api/auth/signup", response_model=AuthResponse, dependencies=[Depends(rate_limit_signup)])
-async def auth_signup(payload: SignupRequest, response: Response):
-    """Registers a new Analyst ('user') account and issues dual JWT + refresh tokens."""
+async def auth_signup(payload: SignupRequest, request: Request, response: Response):
+    """Registers a new Analyst ('user') account scoped to an organization and issues dual JWT + refresh tokens."""
+    requested_slug = (payload.org_slug or request.headers.get("x-org-slug") or "").strip().lower()
+    org_id = DEFAULT_ORG_ID
+    if requested_slug:
+        org = await asyncio.to_thread(get_organization_by_slug, requested_slug)
+        if org is None:
+            raise HTTPException(status_code=404, detail=f"Organization '{requested_slug}' not found.")
+        org_id = org["org_id"]
+
     try:
         user = await asyncio.to_thread(
             create_user,
@@ -305,7 +420,11 @@ async def auth_signup(payload: SignupRequest, response: Response):
             payload.full_name,
             payload.password,
             "user",
+            None,
+            org_id,
         )
+    except OrgNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except UserAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -320,10 +439,24 @@ async def auth_signup(payload: SignupRequest, response: Response):
 
 
 @server.post("/api/auth/login", response_model=AuthResponse, dependencies=[Depends(rate_limit_login)])
-async def auth_login(payload: LoginRequest, response: Response):
-    """Authenticates email/password with Argon2id, lockout protection, and dual tokens."""
+async def auth_login(payload: LoginRequest, request: Request, response: Response):
+    """Authenticates email/password scoped to an organization with Argon2id, lockout protection, and dual tokens."""
+    requested_slug = (payload.org_slug or request.headers.get("x-org-slug") or "").strip().lower()
+    target_org_id: Optional[str] = None
+    if requested_slug:
+        org = await asyncio.to_thread(get_organization_by_slug, requested_slug)
+        if org is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        target_org_id = org["org_id"]
+
     try:
-        user = await asyncio.to_thread(authenticate_user, payload.email, payload.password)
+        user = await asyncio.to_thread(
+            authenticate_user,
+            payload.email,
+            payload.password,
+            None,
+            target_org_id,
+        )
     except AccountLockedError as exc:
         raise HTTPException(
             status_code=429,
@@ -398,19 +531,25 @@ async def auth_me(current_user: Optional[Dict[str, Any]] = Depends(get_optional_
 
 @server.get("/api/telemetry", response_model=TelemetryResponse)
 @server.get("/telemetry", response_model=TelemetryResponse)
-async def get_telemetry():
+async def get_telemetry(tenant: Dict[str, str] = Depends(get_tenant_context)):
     """
     Fast, non-blocking telemetry endpoint returning RAGAS benchmark results
-    and live index stats across ChromaDB, BM25, and SQLite.
+    and live tenant-scoped index stats across ChromaDB, BM25, and SQLite.
     """
-    data = await asyncio.to_thread(collect_telemetry_stats)
+    data = await asyncio.to_thread(collect_telemetry_stats, tenant["org_id"])
     return TelemetryResponse(**data)
 
 @server.post("/ask", response_model=ChatResponse)
-async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
-    # 1. Semantic Cache check (Bypasses retrieval and LLM on hit)
+async def ask_query(
+    request: QueryRequest,
+    background_tasks: BackgroundTasks,
+    tenant: Dict[str, str] = Depends(get_tenant_context),
+):
+    org_id = tenant["org_id"]
+
+    # 1. Tenant-Isolated Semantic Cache check (Bypasses retrieval and LLM on hit)
     cache = get_semantic_cache()
-    cached_result = await cache.lookup(request.query)
+    cached_result = await cache.lookup(request.query, org_id=org_id)
     if cached_result and cached_result.get("hit"):
         return ChatResponse(
             response=cached_result.get("response", ""),
@@ -422,27 +561,29 @@ async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
 
     handler = get_langfuse_callback(
         session_id=request.thread_id,
-        metadata={"thread_id": request.thread_id, "endpoint": "/ask"}
+        metadata={"thread_id": request.thread_id, "org_id": org_id, "endpoint": "/ask"}
     )
     callbacks = [handler] if handler else []
     config = {
         "configurable": {"thread_id": request.thread_id},
         "callbacks": callbacks,
-        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id}
+        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id, "org_id": org_id}
     }
-    
+
     try:
-        # Non-blocking async invocation of the LangGraph state machine
+        # Non-blocking async invocation of the LangGraph state machine scoped to org_id
         result = await graph_app.ainvoke(
-            {"query": request.query, "user_query": request.query},
+            {"query": request.query, "user_query": request.query, "org_id": org_id},
             config
         )
-        
+
         # Check if graph paused at human_review_node interrupt
         snapshot = graph_app.get_state(config)
         status = "escalated" if (snapshot and snapshot.next) else "success"
-        
-        # Asynchronously cache successful safe_rag responses in the background
+        if status == "escalated":
+            await asyncio.to_thread(record_escalated_thread, request.thread_id, org_id)
+
+        # Asynchronously cache successful safe_rag responses under org_id namespace
         if result.get("intent") == "safe_rag" and status == "success":
             background_tasks.add_task(
                 cache.set,
@@ -450,12 +591,13 @@ async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
                 response=result.get("response", ""),
                 intent="safe_rag",
                 context=result.get("context", []),
-                retrieved_chunks=result.get("retrieved_chunks", [])
+                retrieved_chunks=result.get("retrieved_chunks", []),
+                org_id=org_id,
             )
 
         if handler:
             background_tasks.add_task(flush_langfuse, handler)
-            
+
         return ChatResponse(
             response=result.get("response", "Escalated to human supervisor."),
             intent=result.get("intent", "Unknown"),
@@ -473,29 +615,32 @@ async def ask_query(request: QueryRequest, background_tasks: BackgroundTasks):
 async def chat_stream(
     request: QueryRequest,
     current_user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    tenant: Dict[str, str] = Depends(get_tenant_context),
 ):
     """
     Asynchronous Server-Sent Events (SSE) streaming endpoint emitting structured events
-    for each pipeline stage: guardrail_route, retrieval_results, crag_grade,
-    hitl_paused, final_response, and done.
+    for each pipeline stage, strictly isolated to the active tenant (`org_id`).
     """
+    org_id = tenant["org_id"]
     if current_user is not None:
         await asyncio.to_thread(
             record_user_thread,
             request.thread_id,
             current_user["id"],
             request.query,
+            None,
+            org_id,
         )
 
     handler = get_langfuse_callback(
         session_id=request.thread_id,
-        metadata={"thread_id": request.thread_id, "endpoint": "/api/chat/stream"}
+        metadata={"thread_id": request.thread_id, "org_id": org_id, "endpoint": "/api/chat/stream"}
     )
     callbacks = [handler] if handler else []
     config = {
         "configurable": {"thread_id": request.thread_id},
         "callbacks": callbacks,
-        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id}
+        "metadata": {"thread_id": request.thread_id, "session_id": request.thread_id, "org_id": org_id}
     }
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -507,9 +652,9 @@ async def chat_stream(
         collected_context = []
 
         try:
-            # 1. Semantic Cache Check (Bypasses retrieval and LLM synthesis on hit)
+            # 1. Tenant-Isolated Semantic Cache Check (Bypasses retrieval and LLM synthesis on hit)
             cache = get_semantic_cache()
-            cached_result = await cache.lookup(request.query)
+            cached_result = await cache.lookup(request.query, org_id=org_id)
             if cached_result and cached_result.get("hit"):
                 cache_latency = round((time.perf_counter() - t_start) * 1000)
                 similarity = round(float(cached_result.get("similarity", 1.0)), 4)
@@ -566,7 +711,7 @@ async def chat_stream(
 
             # Stream execution stage-by-stage using LangGraph updates
             async for update in graph_app.astream(
-                {"query": request.query, "user_query": request.query},
+                {"query": request.query, "user_query": request.query, "org_id": org_id},
                 config,
                 stream_mode="updates"
             ):
@@ -652,13 +797,14 @@ async def chat_stream(
                         needs_esc = node_out.get("needs_escalation", False)
                         if not needs_esc:
                             final_response_emitted = True
-                            # Asynchronously store generated response into semantic cache
+                            # Asynchronously store generated response into tenant-namespaced semantic cache
                             asyncio.create_task(cache.set(
                                 query=request.query,
                                 response=response_text,
                                 intent="safe_rag",
                                 context=collected_context or node_out.get("context", []),
-                                retrieved_chunks=collected_chunks or node_out.get("retrieved_chunks", [])
+                                retrieved_chunks=collected_chunks or node_out.get("retrieved_chunks", []),
+                                org_id=org_id,
                             ))
                             yield format_sse("final_response", {
                                 "response": response_text,
@@ -702,6 +848,7 @@ async def chat_stream(
             # Check if execution paused before human_review_node (HITL Interrupt)
             snapshot = graph_app.get_state(config)
             if snapshot and snapshot.next:
+                await asyncio.to_thread(record_escalated_thread, request.thread_id, org_id)
                 state_vals = snapshot.values or {}
                 escalation_resp = state_vals.get("response") or "This query has been escalated to a human supervisor."
                 intent_val = state_vals.get("intent", "escalation_hitl")
@@ -783,7 +930,26 @@ async def resume_chat(
                 status_code=400,
                 detail=f"Thread '{request.thread_id}' is not currently paused for human review."
             )
-        
+
+        # Enforce HITL Supervisor Tenant Isolation
+        state_vals = getattr(snapshot, "values", None)
+        thread_org_id: Optional[str] = None
+        if isinstance(state_vals, dict):
+            raw_org = state_vals.get("org_id")
+            if isinstance(raw_org, str) and raw_org.strip():
+                thread_org_id = raw_org.strip()
+        if not thread_org_id:
+            thread_org_id = await asyncio.to_thread(get_escalated_thread_org_id, request.thread_id)
+        if not thread_org_id:
+            thread_org_id = DEFAULT_ORG_ID
+
+        supervisor_org_id = (current_user.get("org_id") or DEFAULT_ORG_ID).strip()
+        if supervisor_org_id != thread_org_id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cross-organization access denied: supervisor belongs to '{supervisor_org_id}', thread belongs to '{thread_org_id}'."
+            )
+
         override = request.response or request.feedback or "Approved by human supervisor."
         
         # Non-blocking state update to inject supervisor response
@@ -848,10 +1014,13 @@ async def upload_knowledge_file(
             detail=f"Unsupported file format '{file_ext}'. Allowed formats: {', '.join(sorted(ALLOWED_UPLOAD_EXTENSIONS))}"
         )
 
-    # 1. Save uploaded file to data/uploads/
-    upload_dir = Path("data/uploads")
+    org_id = (current_user.get("org_id") or DEFAULT_ORG_ID).strip() or DEFAULT_ORG_ID
+    safe_filename = Path(file.filename).name
+
+    # 1. Save uploaded file to tenant-isolated data/uploads/{org_id}/
+    upload_dir = Path("data/uploads") / org_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    destination_path = upload_dir / file.filename
+    destination_path = upload_dir / safe_filename
 
     try:
         content = await file.read()
@@ -859,14 +1028,17 @@ async def upload_knowledge_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e}")
 
-    # 2. Process file asynchronously in background thread
+    # 2. Process file asynchronously in background thread scoped to org_id
     try:
-        result = await asyncio.to_thread(process_uploaded_file, destination_path, file.filename)
-        return UploadResponse(**result)
+        result = await asyncio.to_thread(process_uploaded_file, destination_path, safe_filename, org_id)
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error indexing file '{file.filename}': {e}")
+        raise HTTPException(status_code=500, detail=f"Error indexing file '{safe_filename}': {e}")
+
+    # 3. Invalidate semantic cache entries for this organization (`semcache:{org_id}:*`)
+    await get_semantic_cache().invalidate_org(org_id)
+    return UploadResponse(**result)
 
 if __name__ == "__main__":
     import uvicorn
