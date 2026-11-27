@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -214,7 +215,9 @@ function NexusControlPlane() {
   const [demoSupervisorBusy, setDemoSupervisorBusy] = useState(false);
   const [latestQuery, setLatestQuery] = useState("");
   const [orgMenuOpen, setOrgMenuOpen] = useState(false);
-  const orgMenuRef = useRef(null);
+  const [orgMenuCoords, setOrgMenuCoords] = useState({ top: 72, left: 16 });
+  const orgTriggerRef = useRef(null);
+  const orgDropdownRef = useRef(null);
   const prevOrgIdRef = useRef(activeOrg?.org_id || 'org_nexus');
 
   // Live Telemetry from /api/telemetry
@@ -288,17 +291,49 @@ function NexusControlPlane() {
     }
   }, [activeOrg?.org_id]);
 
-  // Close workspace dropdown on outside click
+  const updateOrgMenuPosition = useCallback(() => {
+    if (!orgTriggerRef.current || typeof window === 'undefined') return;
+    const rect = orgTriggerRef.current.getBoundingClientRect();
+    const menuWidth = 264;
+    const clampedLeft = Math.min(
+      Math.max(12, rect.right - menuWidth),
+      Math.max(12, window.innerWidth - menuWidth - 12)
+    );
+    setOrgMenuCoords({
+      top: Math.round(rect.bottom + 8),
+      left: Math.round(clampedLeft),
+    });
+  }, []);
+
+  // Keep portal workspace dropdown aligned and close on outside click or Escape
   useEffect(() => {
     if (!orgMenuOpen) return;
+    updateOrgMenuPosition();
+
     const handleOutside = (e) => {
-      if (orgMenuRef.current && !orgMenuRef.current.contains(e.target)) {
+      const inTrigger = orgTriggerRef.current?.contains(e.target);
+      const inDropdown = orgDropdownRef.current?.contains(e.target);
+      if (!inTrigger && !inDropdown) {
         setOrgMenuOpen(false);
       }
     };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setOrgMenuOpen(false);
+      }
+    };
+
     window.addEventListener('mousedown', handleOutside);
-    return () => window.removeEventListener('mousedown', handleOutside);
-  }, [orgMenuOpen]);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', updateOrgMenuPosition);
+    window.addEventListener('scroll', updateOrgMenuPosition, true);
+    return () => {
+      window.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', updateOrgMenuPosition);
+      window.removeEventListener('scroll', updateOrgMenuPosition, true);
+    };
+  }, [orgMenuOpen, updateOrgMenuPosition]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -802,10 +837,10 @@ function NexusControlPlane() {
       {/* Main AI Observability & Control Plane Area */}
       <main className="flex-1 flex flex-col relative z-10 overflow-hidden">
         {/* Top Header Bar */}
-        <header className={`h-20 border-b px-8 flex items-center justify-between backdrop-blur-md transition-colors ${
+        <header className={`relative z-50 overflow-visible h-20 border-b px-8 flex items-center justify-between backdrop-blur-md transition-colors ${
           isDark 
-            ? 'bg-[#0F1629]/75 border-[#1E293B]' 
-            : 'bg-white/80 border-emerald-200/75 shadow-xs'
+            ? 'bg-[#0F1629]/85 border-[#1E293B]' 
+            : 'bg-white/90 border-emerald-200/75 shadow-xs'
         }`}>
           {/* Logo & System Identity */}
           <div className="flex items-center gap-4">
@@ -855,13 +890,21 @@ function NexusControlPlane() {
           </div>
           
           {/* Action Toolbar */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 overflow-visible">
              {/* Multi-Tenant Workspace Switcher */}
-             <div ref={orgMenuRef} className="relative">
+             <div className="relative overflow-visible">
                <button
+                 ref={orgTriggerRef}
                  type="button"
-                 onClick={() => setOrgMenuOpen((prev) => !prev)}
+                 onClick={() => {
+                   if (!orgMenuOpen) {
+                     updateOrgMenuPosition();
+                   }
+                   setOrgMenuOpen((prev) => !prev);
+                 }}
                  disabled={loading}
+                 aria-haspopup="listbox"
+                 aria-expanded={orgMenuOpen}
                  title="Switch Organization Workspace or Register New Org"
                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all border text-xs font-bold disabled:opacity-50 ${
                    isDark
@@ -887,84 +930,99 @@ function NexusControlPlane() {
                  />
                </button>
 
-               <AnimatePresence>
-                 {orgMenuOpen && (
-                   <motion.div
-                     initial={{ opacity: 0, y: 6, scale: 0.97 }}
-                     animate={{ opacity: 1, y: 0, scale: 1 }}
-                     exit={{ opacity: 0, y: 6, scale: 0.97 }}
-                     transition={{ duration: 0.15 }}
-                     className={`absolute right-0 mt-2 w-64 rounded-2xl border shadow-2xl overflow-hidden z-50 backdrop-blur-xl ${
-                       isDark
-                         ? 'bg-[#0B1120]/95 border-[#1E293B] text-slate-100'
-                         : 'bg-white/95 border-emerald-200 text-slate-900'
-                     }`}
-                   >
-                     <div
-                       className={`px-3.5 py-2 border-b text-[10px] font-mono font-bold uppercase tracking-wider ${
-                         isDark
-                           ? 'border-[#1E293B] text-slate-400 bg-[#0F1629]/70'
-                           : 'border-emerald-100 text-slate-600 bg-emerald-50/60'
-                       }`}
-                     >
-                       Active Tenant Workspace
-                     </div>
-
-                     <div className="p-1.5 space-y-0.5 max-h-60 overflow-y-auto">
-                       {organizations.map((org) => {
-                         const isSelected = org.org_id === activeOrg?.org_id;
-                         return (
-                           <button
-                             key={org.org_id}
-                             type="button"
-                             onClick={() => handleWorkspaceSelect(org)}
-                             className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-colors text-left ${
-                               isSelected
-                                 ? isDark
-                                   ? 'bg-accent-emerald/20 text-emerald-300 border border-accent-emerald/35'
-                                   : 'bg-emerald-50 text-emerald-900 border border-emerald-300'
-                                 : isDark
-                                 ? 'hover:bg-white/5 text-slate-200 border border-transparent'
-                                 : 'hover:bg-emerald-50/70 text-slate-700 border border-transparent'
-                             }`}
-                           >
-                             <div className="min-w-0">
-                               <div className="truncate">{org.name}</div>
-                               <div
-                                 className={`text-[10px] font-mono ${
-                                   isDark ? 'text-slate-400' : 'text-slate-500'
-                                 }`}
-                               >
-                                 slug: {org.slug}
-                               </div>
-                             </div>
-                             {isSelected && <Check className="w-4 h-4 text-accent-emerald flex-shrink-0" />}
-                           </button>
-                         );
-                       })}
-                     </div>
-
-                     <div
-                       className={`p-1.5 border-t ${
-                         isDark ? 'border-[#1E293B] bg-[#0F1629]/50' : 'border-emerald-100 bg-emerald-50/40'
-                       }`}
-                     >
-                       <button
-                         type="button"
-                         onClick={handleNewOrganizationClick}
-                         className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
+               {typeof document !== 'undefined' &&
+                 createPortal(
+                   <AnimatePresence>
+                     {orgMenuOpen && (
+                       <motion.div
+                         ref={orgDropdownRef}
+                         role="listbox"
+                         aria-label="Organization Workspaces"
+                         initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                         animate={{ opacity: 1, y: 0, scale: 1 }}
+                         exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                         transition={{ duration: 0.15 }}
+                         style={{
+                           position: 'fixed',
+                           top: `${orgMenuCoords.top}px`,
+                           left: `${orgMenuCoords.left}px`,
+                           width: '264px',
+                         }}
+                         className={`z-[999] rounded-2xl border shadow-2xl overflow-hidden backdrop-blur-xl ${
                            isDark
-                             ? 'text-accent-cyan hover:bg-accent-cyan/10'
-                             : 'text-emerald-700 hover:bg-emerald-100/70'
+                             ? 'bg-slate-900/98 border-slate-700/80 text-slate-100 shadow-black/70'
+                             : 'bg-white/98 border-slate-200 text-slate-900 shadow-slate-900/15'
                          }`}
                        >
-                         <PlusCircle className="w-4 h-4 flex-shrink-0" />
-                         <span>+ New Organization</span>
-                       </button>
-                     </div>
-                   </motion.div>
+                         <div
+                           className={`px-3.5 py-2 border-b text-[10px] font-mono font-bold uppercase tracking-wider ${
+                             isDark
+                               ? 'border-slate-700/80 text-slate-400 bg-slate-950/60'
+                               : 'border-slate-200 text-slate-600 bg-slate-50/90'
+                           }`}
+                         >
+                           Active Tenant Workspace
+                         </div>
+
+                         <div className="p-1.5 space-y-0.5 max-h-60 overflow-y-auto">
+                           {organizations.map((org) => {
+                             const isSelected = org.org_id === activeOrg?.org_id;
+                             return (
+                               <button
+                                 key={org.org_id}
+                                 type="button"
+                                 role="option"
+                                 aria-selected={isSelected}
+                                 onClick={() => handleWorkspaceSelect(org)}
+                                 className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-colors text-left ${
+                                   isSelected
+                                     ? isDark
+                                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                       : 'bg-emerald-50 text-emerald-900 border border-emerald-300'
+                                     : isDark
+                                     ? 'hover:bg-slate-800/90 text-slate-100 border border-transparent'
+                                     : 'hover:bg-slate-100 text-slate-800 border border-transparent'
+                                 }`}
+                               >
+                                 <div className="min-w-0">
+                                   <div className="truncate">{org.name}</div>
+                                   <div
+                                     className={`text-[10px] font-mono ${
+                                       isDark ? 'text-slate-400' : 'text-slate-500'
+                                     }`}
+                                   >
+                                     slug: {org.slug}
+                                   </div>
+                                 </div>
+                                 {isSelected && <Check className="w-4 h-4 text-accent-emerald flex-shrink-0" />}
+                               </button>
+                             );
+                           })}
+                         </div>
+
+                         <div
+                           className={`p-1.5 border-t ${
+                             isDark ? 'border-slate-700/80 bg-slate-950/50' : 'border-slate-200 bg-slate-50/80'
+                           }`}
+                         >
+                           <button
+                             type="button"
+                             onClick={handleNewOrganizationClick}
+                             className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
+                               isDark
+                                 ? 'text-accent-cyan hover:bg-accent-cyan/15'
+                                 : 'text-emerald-700 hover:bg-emerald-100/80'
+                             }`}
+                           >
+                             <PlusCircle className="w-4 h-4 flex-shrink-0" />
+                             <span>+ New Organization</span>
+                           </button>
+                         </div>
+                       </motion.div>
+                     )}
+                   </AnimatePresence>,
+                   document.body
                  )}
-               </AnimatePresence>
              </div>
 
              {/* Upload Status Badge */}
@@ -1113,7 +1171,7 @@ function NexusControlPlane() {
         </header>
 
         {/* Chat / Observability Main Viewport */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6 scroll-smooth scrollbar-hide">
+        <div ref={scrollRef} className="relative z-10 flex-1 overflow-y-auto p-6 md:p-8 space-y-6 scroll-smooth scrollbar-hide">
           {messages.length === 0 && (
             <motion.div 
               initial={{ opacity: 0, scale: 0.98 }}
@@ -1288,7 +1346,7 @@ function NexusControlPlane() {
               </div>
 
               {/* 8 SHOWCASE ARCHITECTURE ENGINEERING TEST CASES (2x4 Grid) */}
-              <div className="space-y-3 pt-2">
+              <div className="relative z-10 space-y-3 pt-2">
                 <div className="flex items-center justify-between px-1">
                   <span className={`text-[10px] font-mono font-bold uppercase tracking-wider flex items-center gap-1.5 ${
                     isDark ? 'text-slate-400' : 'text-slate-600'
@@ -1305,7 +1363,7 @@ function NexusControlPlane() {
                   variants={PRESET_GRID_VARIANTS}
                   initial="hidden"
                   animate="visible"
-                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-left"
+                  className="relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 text-left"
                 >
                   {SHOWCASE_PRESETS.map((item, idx) => (
                     <motion.div
